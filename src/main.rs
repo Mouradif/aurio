@@ -1,115 +1,85 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Producer, Split};
-use std::thread;
+use std::sync::{Arc, Mutex};
 
 fn main() {
     let host = cpal::default_host();
-    let device = host.default_output_device().expect("no output device");
-    let config = device.default_output_config().expect("no default config");
 
-    let rb = HeapRb::<NoteEvent>::new(64);
-    let (mut producer, mut consumer) = rb.split();
+    let input_device = host.default_input_device().expect("no input device");
+    let output_device = host.default_output_device().expect("no output device");
 
-    // Audio thread state
-    let sample_rate = config.sample_rate() as f32;
-    let channels = config.channels();
-    let mut phase = 0.0f32;
-    let mut current_freq: Option<f32> = None;
+    let config: cpal::StreamConfig = input_device
+        .default_input_config()
+        .expect("no default input config")
+        .into();
 
-    let stream = device
-        .build_output_stream(
-            &config.into(),
-            move |data: &mut [f32], _| {
-                // Drain events from ring buffer
-                while let Some(event) = consumer.try_pop() {
-                    match event {
-                        NoteEvent::NoteOn(freq) => {
-                            current_freq = Some(freq);
-                            phase = 0.0; // Reset phase for clean attack
-                        }
-                        NoteEvent::NoteOff => current_freq = None,
-                    }
-                }
+    let sample_rate = config.sample_rate as usize;
+    let delay_samples = sample_rate; // 1 second delay
 
-                for frame in data.chunks_mut(channels.into()) {
-                    let sample = match current_freq {
-                        Some(freq) => {
-                            let out = (phase * std::f32::consts::TAU).sin() * 0.3;
-                            phase = (phase + freq / sample_rate) % 1.0;
-                            out
-                        }
-                        None => 0.0,
-                    };
+    let buffer = Arc::new(Mutex::new(DelayBuffer::new(delay_samples)));
+    let buffer_in = buffer.clone();
+    let buffer_out = buffer.clone();
 
-                    for s in frame {
-                        *s = sample;
-                    }
+    let input_stream = input_device
+        .build_input_stream(
+            &config,
+            move |data: &[f32], _| {
+                let mut buf = buffer_in.lock().unwrap();
+                for &sample in data {
+                    buf.write(sample);
                 }
             },
-            |err| eprintln!("stream error: {err}"),
+            |err| eprintln!("input error: {err}"),
             None,
         )
-        .expect("failed to build stream");
+        .expect("failed to build input stream");
 
-    stream.play().expect("failed to play");
-
-    // Keyboard input thread
-    let input_handle = thread::spawn(move || {
-        enable_raw_mode().expect("failed to enable raw mode");
-        println!("Piano ready! Press A-K for white keys, W/E/T/Y/U for black keys. ESC to quit.\r");
-
-        loop {
-            if let Ok(Event::Key(key_event)) = event::read() {
-                if key_event.code == KeyCode::Esc {
-                    break;
+    let output_stream = output_device
+        .build_output_stream(
+            &config,
+            move |data: &mut [f32], _| {
+                let mut buf = buffer_out.lock().unwrap();
+                for sample in data {
+                    *sample = buf.read();
                 }
+            },
+            |err| eprintln!("output error: {err}"),
+            None,
+        )
+        .expect("failed to build output stream");
 
-                if let Some(freq) = key_to_freq(key_event.code) {
-                    let event = match key_event.kind {
-                        KeyEventKind::Press => NoteEvent::NoteOn(freq),
-                        KeyEventKind::Release => NoteEvent::NoteOff,
-                        _ => continue,
-                    };
-                    let _ = producer.try_push(event);
-                }
-            }
+    input_stream.play().expect("failed to start input");
+    output_stream.play().expect("failed to start output");
+
+    println!("Delay effect running (1 second). Press Enter to quit.");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+}
+
+struct DelayBuffer {
+    data: Vec<f32>,
+    write_pos: usize,
+    read_pos: usize,
+}
+
+impl DelayBuffer {
+    fn new(delay_samples: usize) -> Self {
+        let size = delay_samples + 8192;
+        Self {
+            data: vec![0.0; size],
+            write_pos: delay_samples, // Write starts ahead
+            read_pos: 0,              // Read starts at 0
         }
-
-        disable_raw_mode().expect("failed to disable raw mode");
-    });
-
-    input_handle.join().unwrap();
-}
-
-fn key_to_freq(code: KeyCode) -> Option<f32> {
-    // C4 = 261.63 Hz, each semitone is * 2^(1/12)
-    let semitone = |n: i32| 261.63 * 2.0_f32.powf(n as f32 / 12.0);
-
-    match code {
-        // White keys: C D E F G A B C
-        KeyCode::Char('a') => Some(semitone(0)),  // C
-        KeyCode::Char('s') => Some(semitone(2)),  // D
-        KeyCode::Char('d') => Some(semitone(4)),  // E
-        KeyCode::Char('f') => Some(semitone(5)),  // F
-        KeyCode::Char('g') => Some(semitone(7)),  // G
-        KeyCode::Char('h') => Some(semitone(9)),  // A
-        KeyCode::Char('j') => Some(semitone(11)), // B
-        KeyCode::Char('k') => Some(semitone(12)), // C5
-        // Black keys: C# D# F# G# A#
-        KeyCode::Char('w') => Some(semitone(1)),  // C#
-        KeyCode::Char('e') => Some(semitone(3)),  // D#
-        KeyCode::Char('t') => Some(semitone(6)),  // F#
-        KeyCode::Char('y') => Some(semitone(8)),  // G#
-        KeyCode::Char('u') => Some(semitone(10)), // A#
-        _ => None,
     }
-}
 
-enum NoteEvent {
-    NoteOn(f32),
-    NoteOff,
+    fn write(&mut self, sample: f32) {
+        self.data[self.write_pos] = sample;
+        self.write_pos = (self.write_pos + 1) % self.data.len();
+    }
+
+    fn read(&mut self) -> f32 {
+        let sample = self.data[self.read_pos];
+        self.read_pos = (self.read_pos + 1) % self.data.len();
+        sample
+    }
 }
 
