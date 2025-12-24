@@ -1,11 +1,20 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use midir::MidiInput;
-use ringbuf::HeapRb;
+use midir::{MidiInput, MidiOutput};
 use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::HeapRb;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 const NUM_TRACKS: usize = 8;
+
+// APC KEY 25 pad colors (velocity values)
+const LED_OFF: u8 = 0;
+const LED_GREEN: u8 = 1;
+const LED_GREEN_BLINK: u8 = 2;
+const LED_RED: u8 = 3;
+const LED_RED_BLINK: u8 = 4;
+const LED_YELLOW: u8 = 5;
+const LED_YELLOW_BLINK: u8 = 6;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum TrackState {
@@ -83,15 +92,21 @@ fn main() {
     let global_sample_count_midi = global_sample_count.clone();
     let global_sample_count_audio = global_sample_count.clone();
 
-    // Per-track pending triggers (255 = no action, 0 = trigger pending)
+    // Per-track triggers
     let track_triggers: Vec<Arc<AtomicBool>> = (0..NUM_TRACKS)
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
-    let track_triggers_midi: Vec<Arc<AtomicBool>> =
-        track_triggers.iter().map(|t| t.clone()).collect();
-    let track_triggers_audio: Vec<Arc<AtomicBool>> =
-        track_triggers.iter().map(|t| t.clone()).collect();
+    let track_triggers_midi: Vec<Arc<AtomicBool>> = track_triggers.iter().map(|t| t.clone()).collect();
+    let track_triggers_audio: Vec<Arc<AtomicBool>> = track_triggers.iter().map(|t| t.clone()).collect();
 
+    // LED state feedback from audio thread
+    let track_states: Vec<Arc<AtomicU8>> = (0..NUM_TRACKS)
+        .map(|_| Arc::new(AtomicU8::new(TrackState::Empty as u8)))
+        .collect();
+    let track_states_audio: Vec<Arc<AtomicU8>> = track_states.iter().map(|t| t.clone()).collect();
+    let track_states_led: Vec<Arc<AtomicU8>> = track_states.iter().map(|t| t.clone()).collect();
+
+    // MIDI input
     let midi_in = MidiInput::new("aurio").expect("failed to create MIDI input");
     let ports = midi_in.ports();
     let port = ports
@@ -101,10 +116,29 @@ fn main() {
         .expect("no MIDI input found");
 
     println!("MIDI: {}", midi_in.port_name(port).unwrap_or_default());
+
+    // MIDI output for LEDs
+    let midi_out = MidiOutput::new("aurio").expect("failed to create MIDI output");
+    let out_ports = midi_out.ports();
+    let out_port = out_ports
+        .iter()
+        .find(|p| midi_out.port_name(p).unwrap_or_default().contains("APC"))
+        .or_else(|| out_ports.first())
+        .expect("no MIDI output found");
+
+    let mut midi_conn_out = midi_out
+        .connect(out_port, "aurio-output")
+        .expect("failed to connect MIDI output");
+
+    // Initialize all track LEDs to off
+    for i in 0..NUM_TRACKS {
+        let _ = midi_conn_out.send(&[0x90, i as u8, LED_OFF]);
+    }
+
     println!("Bars: 1 (use CC 52 to change)");
     println!("Notes 0-7 = tracks. Tap twice on any note to set tempo.\n");
 
-    let _midi_conn = midi_in
+    let _midi_conn_in = midi_in
         .connect(
             port,
             "aurio-input",
@@ -149,7 +183,7 @@ fn main() {
             },
             (),
         )
-        .expect("failed to connect MIDI");
+        .expect("failed to connect MIDI input");
 
     let rb = HeapRb::<f32>::new(256);
     let (mut producer, mut consumer) = rb.split();
@@ -178,7 +212,6 @@ fn main() {
     let mut fadeout_pos = 0usize;
     let mut fading_out = false;
 
-    // Latched triggers - set by MIDI, cleared on beat
     let mut pending_triggers = [false; NUM_TRACKS];
 
     let output_stream = output_device
@@ -193,7 +226,6 @@ fn main() {
                     fading_out = true;
                 }
 
-                // Latch any new triggers from MIDI
                 for i in 0..NUM_TRACKS {
                     if track_triggers_audio[i].swap(false, Ordering::Relaxed) {
                         pending_triggers[i] = true;
@@ -204,10 +236,8 @@ fn main() {
                     global_sample_count_audio.fetch_add(1, Ordering::Relaxed);
                     let input_sample = consumer.try_pop().unwrap_or(0.0);
 
-                    let is_beat_start =
-                        tempo_is_set && beat_samples > 0 && global_phase_in_beat == 0;
+                    let is_beat_start = tempo_is_set && beat_samples > 0 && global_phase_in_beat == 0;
 
-                    // Process pending triggers at beat boundary
                     if is_beat_start {
                         for i in 0..NUM_TRACKS {
                             if pending_triggers[i] {
@@ -231,15 +261,12 @@ fn main() {
                                         track.pos = 0;
                                         println!("Track {} playing", i);
                                     }
-                                    TrackState::Countdown | TrackState::Recording => {
-                                        // Can't interrupt recording
-                                    }
+                                    TrackState::Countdown | TrackState::Recording => {}
                                 }
                             }
                         }
                     }
 
-                    // Generate click for any track in countdown or recording
                     let mut click = 0.0f32;
                     if let Some(track) = tracks.iter().find(|t| {
                         t.state == TrackState::Countdown || t.state == TrackState::Recording
@@ -254,7 +281,6 @@ fn main() {
                         }
                     }
 
-                    // Process each track
                     let mut loop_mix = 0.0f32;
 
                     for (i, track) in tracks.iter_mut().enumerate() {
@@ -264,11 +290,7 @@ fn main() {
                                 if track.phase_in_beat >= beat_samples {
                                     track.phase_in_beat = 0;
                                     track.beats_elapsed += 1;
-                                    println!(
-                                        "Track {} countdown: {}",
-                                        i,
-                                        4 - track.beats_elapsed.min(4)
-                                    );
+                                    println!("Track {} countdown: {}", i, 4 - track.beats_elapsed.min(4));
 
                                     if track.beats_elapsed >= 4 {
                                         track.state = TrackState::Recording;
@@ -306,17 +328,14 @@ fn main() {
                                 let out = if track.length > crossfade_samples * 2 {
                                     if track.pos < crossfade_samples {
                                         let t = track.pos as f32 / crossfade_samples as f32;
-                                        let fade_out =
-                                            (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                        let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
                                         let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
-                                        let from_end = track.buffer
-                                            [track.length - crossfade_samples + track.pos];
+                                        let from_end = track.buffer[track.length - crossfade_samples + track.pos];
                                         from_end * fade_out + looped * fade_in
                                     } else if track.pos >= track.length - crossfade_samples {
                                         let offset = track.pos - (track.length - crossfade_samples);
                                         let t = offset as f32 / crossfade_samples as f32;
-                                        let fade_out =
-                                            (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                        let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
                                         let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
                                         let from_start = track.buffer[offset];
                                         looped * fade_out + from_start * fade_in
@@ -333,9 +352,11 @@ fn main() {
 
                             _ => {}
                         }
+
+                        // Update track state for LED thread
+                        track_states_audio[i].store(track.state as u8, Ordering::Relaxed);
                     }
 
-                    // Advance global beat phase
                     if tempo_is_set && beat_samples > 0 {
                         global_phase_in_beat = (global_phase_in_beat + 1) % beat_samples;
                     }
@@ -360,10 +381,45 @@ fn main() {
     input_stream.play().expect("failed to start input");
     output_stream.play().expect("failed to start output");
 
+    // LED update thread
+    let shutting_down_led = shutting_down.clone();
+    let led_handle = std::thread::spawn(move || {
+        let mut last_states = [255u8; NUM_TRACKS];
+
+        while !shutting_down_led.load(Ordering::Relaxed) {
+            for i in 0..NUM_TRACKS {
+                let state = track_states_led[i].load(Ordering::Relaxed);
+
+                if state != last_states[i] {
+                    last_states[i] = state;
+
+                    let color = match state {
+                        x if x == TrackState::Empty as u8 => LED_OFF,
+                        x if x == TrackState::Countdown as u8 => LED_YELLOW_BLINK,
+                        x if x == TrackState::Recording as u8 => LED_RED,
+                        x if x == TrackState::Playing as u8 => LED_GREEN,
+                        x if x == TrackState::Stopped as u8 => LED_YELLOW,
+                        _ => LED_OFF,
+                    };
+
+                    let _ = midi_conn_out.send(&[0x90, i as u8, color]);
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Turn off all LEDs on exit
+        for i in 0..NUM_TRACKS {
+            let _ = midi_conn_out.send(&[0x90, i as u8, LED_OFF]);
+        }
+    });
+
     println!("Looper ready. Press Enter to quit.");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
 
     shutting_down.store(true, Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_millis(15));
+    let _ = led_handle.join();
 }
