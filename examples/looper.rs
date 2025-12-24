@@ -219,11 +219,30 @@ fn main() {
 
                             *sample = input_sample + click;
                         }
-
                         LooperState::Playing => {
                             let looped = loop_buffer[loop_pos];
+
+                            let crossfade_samples = sample_rate / 200;
+                            let output = if loop_pos < crossfade_samples {
+                                let t = loop_pos as f32 / crossfade_samples as f32;
+                                let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
+                                let from_end =
+                                    loop_buffer[loop_length - crossfade_samples + loop_pos];
+                                from_end * fade_out + looped * fade_in
+                            } else if loop_pos >= loop_length - crossfade_samples {
+                                let offset = loop_pos - (loop_length - crossfade_samples);
+                                let t = offset as f32 / crossfade_samples as f32;
+                                let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
+                                let from_start = loop_buffer[offset];
+                                looped * fade_out + from_start * fade_in
+                            } else {
+                                looped
+                            };
+
                             loop_pos = (loop_pos + 1) % loop_length;
-                            *sample = input_sample + looped;
+                            *sample = input_sample + output;
                         }
                     }
                 }
