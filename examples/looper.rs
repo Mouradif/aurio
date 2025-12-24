@@ -3,7 +3,7 @@ use midir::MidiInput;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 #[derive(Clone, Copy, PartialEq)]
 enum LooperState {
@@ -27,11 +27,15 @@ fn main() {
     let config = cpal::StreamConfig {
         channels: supported_config.channels(),
         sample_rate: supported_config.sample_rate(),
-        buffer_size: cpal::BufferSize::Fixed(64), // Request minimal buffer
+        buffer_size: cpal::BufferSize::Fixed(64),
     };
 
     let sample_rate = config.sample_rate as usize;
     let max_loop_samples = sample_rate * 60;
+
+    // Shutdown signal
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let shutting_down_audio = shutting_down.clone();
 
     // Controls
     let ctrl_bars = Arc::new(AtomicU8::new(0));
@@ -95,7 +99,6 @@ fn main() {
         )
         .expect("failed to connect MIDI");
 
-    // Small ring buffer for minimal latency
     let rb = HeapRb::<f32>::new(256);
     let (mut producer, mut consumer) = rb.split();
 
@@ -122,6 +125,11 @@ fn main() {
     let mut beats_elapsed = 0usize;
     let mut click_phase = 0.0f32;
 
+    // Fadeout state
+    let fadeout_samples = sample_rate / 100; // 10ms
+    let mut fadeout_pos = 0usize;
+    let mut fading_out = false;
+
     let output_stream = output_device
         .build_output_stream(
             &config,
@@ -130,16 +138,20 @@ fn main() {
                 let total_record_beats = bars * 4;
                 let taps = tap_count_audio.load(Ordering::Relaxed);
 
+                if shutting_down_audio.load(Ordering::Relaxed) {
+                    fading_out = true;
+                }
+
                 for sample in data {
                     let current_count = global_sample_count_audio.fetch_add(1, Ordering::Relaxed);
                     let input_sample = consumer.try_pop().unwrap_or(0.0);
 
-                    match state {
+                    let raw_output = match state {
                         LooperState::Idle => {
                             if taps == 1 {
                                 state = LooperState::WaitingSecond;
                             }
-                            *sample = input_sample;
+                            input_sample
                         }
 
                         LooperState::WaitingSecond => {
@@ -153,7 +165,7 @@ fn main() {
                                 state = LooperState::Countdown;
                                 println!("Tempo: {} BPM", 60 * sample_rate / beat_samples);
                             }
-                            *sample = input_sample;
+                            input_sample
                         }
 
                         LooperState::Countdown => {
@@ -182,7 +194,7 @@ fn main() {
                                 }
                             }
 
-                            *sample = input_sample + click;
+                            input_sample + click
                         }
 
                         LooperState::Recording => {
@@ -217,13 +229,14 @@ fn main() {
                                 println!("Playing loop!");
                             }
 
-                            *sample = input_sample + click;
+                            input_sample + click
                         }
+
                         LooperState::Playing => {
                             let looped = loop_buffer[loop_pos];
 
-                            let crossfade_samples = sample_rate / 200;
-                            let output = if loop_pos < crossfade_samples {
+                            let crossfade_samples = sample_rate / 100;
+                            let loop_out = if loop_pos < crossfade_samples {
                                 let t = loop_pos as f32 / crossfade_samples as f32;
                                 let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
                                 let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
@@ -242,8 +255,18 @@ fn main() {
                             };
 
                             loop_pos = (loop_pos + 1) % loop_length;
-                            *sample = input_sample + output;
+                            input_sample + loop_out
                         }
+                    };
+
+                    // Apply fadeout
+                    if fading_out {
+                        let t = fadeout_pos as f32 / fadeout_samples as f32;
+                        let gain = (std::f32::consts::FRAC_PI_2 * (1.0 - t).max(0.0)).sin();
+                        *sample = raw_output * gain;
+                        fadeout_pos += 1;
+                    } else {
+                        *sample = raw_output;
                     }
                 }
             },
@@ -258,5 +281,8 @@ fn main() {
     println!("Looper ready. Press Enter to quit.");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
-}
 
+    // Signal fadeout and wait for it to complete
+    shutting_down.store(true, Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
