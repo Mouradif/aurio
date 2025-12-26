@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use midir::{Ignore, MidiInput};
+use midir::MidiInput;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ fn main() {
         .into();
 
     let sample_rate = config.sample_rate as usize;
-    let max_delay_samples = sample_rate; // 1 second max
+    let max_delay_samples = sample_rate;
 
     // Shared delay control
     let delay_samples = Arc::new(AtomicUsize::new(max_delay_samples));
@@ -35,7 +35,7 @@ fn main() {
 
     println!("MIDI: {}", midi_in.port_name(port).unwrap_or_default());
 
-    let _midi_conn = midi_in
+    let midi_conn = midi_in
         .connect(
             port,
             "aurio-input",
@@ -85,7 +85,7 @@ fn main() {
 
                 for sample in data {
                     // Slew toward target delay (adjust 0.01 for faster/slower response)
-                    current_delay += (target_delay - current_delay) * 0.0001;
+                    current_delay += (target_delay - current_delay) * 0.001;
 
                     // Write incoming audio to delay buffer
                     if let Some(input_sample) = consumer.try_pop() {
@@ -116,4 +116,5 @@ fn main() {
     println!("Delay running. Turn knob (CC 48) to adjust. Press Enter to quit.");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
+    midi_conn.close();
 }

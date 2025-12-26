@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap = "1.8.0"
 cpal = "0.17.0"
 crossterm = "0.29.0"
 midir = "0.10.3"
+notify = "8.2.0"
 ringbuf = "0.4.8"

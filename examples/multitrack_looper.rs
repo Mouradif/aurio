@@ -1,18 +1,16 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use midir::{MidiInput, MidiOutput};
-use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicBool, Ordering};
+use ringbuf::traits::{Consumer, Producer, Split};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 const NUM_TRACKS: usize = 8;
 
 // APC KEY 25 pad colors (velocity values)
 const LED_OFF: u8 = 0;
 const LED_GREEN: u8 = 1;
-const LED_GREEN_BLINK: u8 = 2;
 const LED_RED: u8 = 3;
-const LED_RED_BLINK: u8 = 4;
 const LED_YELLOW: u8 = 5;
 const LED_YELLOW_BLINK: u8 = 6;
 
@@ -64,9 +62,13 @@ fn main() {
         sample_rate: supported_config.sample_rate(),
         buffer_size: cpal::BufferSize::Fixed(64),
     };
+    println!(
+        "Channels: {}\nSample Rate: {}Hz",
+        config.channels, config.sample_rate
+    );
 
     let sample_rate = config.sample_rate as usize;
-    let max_loop_samples = sample_rate * 60;
+    let max_loop_samples = sample_rate * 120; // 2min
 
     let shutting_down = Arc::new(AtomicBool::new(false));
     let shutting_down_audio = shutting_down.clone();
@@ -96,8 +98,10 @@ fn main() {
     let track_triggers: Vec<Arc<AtomicBool>> = (0..NUM_TRACKS)
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
-    let track_triggers_midi: Vec<Arc<AtomicBool>> = track_triggers.iter().map(|t| t.clone()).collect();
-    let track_triggers_audio: Vec<Arc<AtomicBool>> = track_triggers.iter().map(|t| t.clone()).collect();
+    let track_triggers_midi: Vec<Arc<AtomicBool>> =
+        track_triggers.iter().map(|t| t.clone()).collect();
+    let track_triggers_audio: Vec<Arc<AtomicBool>> =
+        track_triggers.iter().map(|t| t.clone()).collect();
 
     // LED state feedback from audio thread
     let track_states: Vec<Arc<AtomicU8>> = (0..NUM_TRACKS)
@@ -236,7 +240,8 @@ fn main() {
                     global_sample_count_audio.fetch_add(1, Ordering::Relaxed);
                     let input_sample = consumer.try_pop().unwrap_or(0.0);
 
-                    let is_beat_start = tempo_is_set && beat_samples > 0 && global_phase_in_beat == 0;
+                    let is_beat_start =
+                        tempo_is_set && beat_samples > 0 && global_phase_in_beat == 0;
 
                     if is_beat_start {
                         for i in 0..NUM_TRACKS {
@@ -290,7 +295,11 @@ fn main() {
                                 if track.phase_in_beat >= beat_samples {
                                     track.phase_in_beat = 0;
                                     track.beats_elapsed += 1;
-                                    println!("Track {} countdown: {}", i, 4 - track.beats_elapsed.min(4));
+                                    println!(
+                                        "Track {} countdown: {}",
+                                        i,
+                                        4 - track.beats_elapsed.min(4)
+                                    );
 
                                     if track.beats_elapsed >= 4 {
                                         track.state = TrackState::Recording;
@@ -328,14 +337,17 @@ fn main() {
                                 let out = if track.length > crossfade_samples * 2 {
                                     if track.pos < crossfade_samples {
                                         let t = track.pos as f32 / crossfade_samples as f32;
-                                        let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                        let fade_out =
+                                            (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
                                         let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
-                                        let from_end = track.buffer[track.length - crossfade_samples + track.pos];
+                                        let from_end = track.buffer
+                                            [track.length - crossfade_samples + track.pos];
                                         from_end * fade_out + looped * fade_in
                                     } else if track.pos >= track.length - crossfade_samples {
                                         let offset = track.pos - (track.length - crossfade_samples);
                                         let t = offset as f32 / crossfade_samples as f32;
-                                        let fade_out = (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
+                                        let fade_out =
+                                            (std::f32::consts::FRAC_PI_2 * (1.0 - t)).sin();
                                         let fade_in = (std::f32::consts::FRAC_PI_2 * t).sin();
                                         let from_start = track.buffer[offset];
                                         looped * fade_out + from_start * fade_in
