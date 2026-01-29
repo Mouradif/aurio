@@ -69,12 +69,12 @@ short, I wanted to create [The Most Amazing Software Ever Created](https://www.y
 Jokes aside, I was originally thinking of having a custom language (not JSON based) but
 a [Very Wise Man](https://github.com/0atman) told me "Just use Lua and RON". So here we are.
 
-Project are folders with the `.aurio` extension. This is a common pattern for MacOS apps, Logic Pro studios are also
+Project are folders with the `.aurio` extension. This is a common pattern for MacOS apps, Logic Pro projects are also
 folders with the `.logicx` extension. For other platforms, it will be a bit less straightforward to deal with but it
 should be fine too.
 
 A `.aurio` project folder contains a `project.ron` which is a simple serialization of the `Project` struct. As well as
-a `samples/` folder with will contain the samples used in that project. For sharing projects between users, it's fine
+a `samples/` folder which will contain the samples used in that project. For sharing projects between users, it's fine
 to just zip and send. Git should be okay here too since the `project.ron` file is properly prettified.
 
 An example project is shipped with this commit at [./TestProject.aurio/](./TestProject.aurio/)
