@@ -1,8 +1,6 @@
 use std::{collections::HashSet, sync::atomic::AtomicU32};
 
-use crate::{
-    AudioGraph, GainState, Node, NodeState, OscillatorState, OscillatorType, OutputState, Wire,
-};
+use crate::{AudioGraph, GainState, Node, NodeState, OscillatorState, OutputState, Wave, Wire};
 
 fn strip_comment(s: &str) -> &str {
     s.split('#').next().unwrap_or("")
@@ -18,9 +16,9 @@ fn parse_node(line: &str) -> Result<Node, String> {
     let inner = match parts.next().ok_or("missing node type")? {
         "Osc" => {
             let osc_type = match parts.next().ok_or("missing wave type")? {
-                "Sine" => OscillatorType::Sine,
-                "Square" => OscillatorType::Square,
-                "Saw" => OscillatorType::Saw,
+                "Sine" => Wave::Sine,
+                "Square" => Wave::Square,
+                "Saw" => Wave::Saw,
                 other => return Err(format!("unknown wave '{other}'")),
             };
 
@@ -151,8 +149,8 @@ mod tests {
         for node in graph.nodes {
             match node.inner {
                 NodeState::Oscillator(state) => match state.osc_type {
-                    OscillatorType::Sine => assert_eq!(state.freq, 330.0),
-                    OscillatorType::Saw => assert_eq!(state.freq, 220.0),
+                    Wave::Sine => assert_eq!(state.freq, 330.0),
+                    Wave::Saw => assert_eq!(state.freq, 220.0),
                     _ => panic!("Expected Sine or Saw"),
                 },
                 NodeState::Gain(state) => assert_eq!(state.value, 0.2),
@@ -180,16 +178,16 @@ mod tests {
 
         match &graph.nodes[0].inner {
             NodeState::Oscillator(state) => match state.osc_type {
-                OscillatorType::Sine => assert_eq!(state.freq, 330.0),
-                OscillatorType::Saw => assert_eq!(state.freq, 220.0),
+                Wave::Sine => assert_eq!(state.freq, 330.0),
+                Wave::Saw => assert_eq!(state.freq, 220.0),
                 _ => panic!("Expected Sine or Saw"),
             },
             _ => panic!("Expected Osc"),
         }
         match &graph.nodes[1].inner {
             NodeState::Oscillator(state) => match state.osc_type {
-                OscillatorType::Sine => assert_eq!(state.freq, 330.0),
-                OscillatorType::Saw => assert_eq!(state.freq, 220.0),
+                Wave::Sine => assert_eq!(state.freq, 330.0),
+                Wave::Saw => assert_eq!(state.freq, 220.0),
                 _ => panic!("Expected Sine or Saw"),
             },
             _ => panic!("Expected Osc"),

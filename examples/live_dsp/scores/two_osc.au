@@ -1,0 +1,11 @@
+[0] Osc Sine 440.0
+[1] Osc Saw 330.0
+[2] Gain 0.05
+[3] Out
+[4] Osc Square 220.0
+
+0->2,
+1->2,
+4->2,
+# Uncomment the next line to enable output
+# 2->3,

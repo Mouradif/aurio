@@ -84,15 +84,12 @@ fn main() {
                     .clamp(1, max_delay_samples) as f32;
 
                 for sample in data {
-                    // Slew toward target delay (adjust 0.01 for faster/slower response)
                     current_delay += (target_delay - current_delay) * 0.001;
 
-                    // Write incoming audio to delay buffer
                     if let Some(input_sample) = consumer.try_pop() {
                         delay_buf[write_pos] = input_sample;
                     }
 
-                    // Fractional read position for smooth interpolation
                     let read_pos_f = (write_pos as f32 + max_delay_samples as f32 - current_delay)
                         % max_delay_samples as f32;
 
@@ -100,7 +97,6 @@ fn main() {
                     let read_pos_1 = (read_pos_0 + 1) % max_delay_samples;
                     let frac = read_pos_f.fract();
 
-                    // Linear interpolation between samples
                     *sample = delay_buf[read_pos_0] * (1.0 - frac) + delay_buf[read_pos_1] * frac;
 
                     write_pos = (write_pos + 1) % max_delay_samples;

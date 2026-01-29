@@ -66,8 +66,8 @@ impl DelayBuffer {
         let size = delay_samples + 8192;
         Self {
             data: vec![0.0; size],
-            write_pos: delay_samples, // Write starts ahead
-            read_pos: 0,              // Read starts at 0
+            write_pos: delay_samples,
+            read_pos: 0,
         }
     }
 
@@ -82,4 +82,3 @@ impl DelayBuffer {
         sample
     }
 }
-
