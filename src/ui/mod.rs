@@ -13,6 +13,7 @@ pub struct AurioApp {
     selected_node: Option<(usize, String)>,
     playing: bool,
     current_nodes: HashMap<usize, String>,
+    project_modified: bool,
 }
 
 impl AurioApp {
@@ -26,6 +27,7 @@ impl AurioApp {
             selected_node: None,
             playing: false,
             current_nodes: HashMap::new(),
+            project_modified: false,
         }
     }
 
@@ -53,6 +55,11 @@ impl AurioApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if ui.button("New Project...").clicked() {
+                    // TODO
+                    ui.close();
+                }
+
                 if ui.button("Open Project...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_title("Open Aurio Project")
@@ -67,8 +74,25 @@ impl AurioApp {
                     }
                 }
 
-                if ui.button("New Project...").clicked() {
-                    // TODO
+                let save_button = if self.project_modified {
+                    ui.button("💾 Save Project *")
+                } else {
+                    ui.button("💾 Save Project")
+                };
+
+                if save_button.clicked() {
+                    if let (Some(project), Some(path)) = (&self.current_project, &self.project_path)
+                    {
+                        match project.save(path) {
+                            Ok(_) => {
+                                self.project_modified = false;
+                                println!("Project saved successfully");
+                            }
+                            Err(e) => {
+                                self.error_message = Some(format!("Failed to save project: {}", e));
+                            }
+                        }
+                    }
                     ui.close();
                 }
 
@@ -80,7 +104,12 @@ impl AurioApp {
             });
             if let Some(project) = &self.current_project {
                 ui.menu_button("Project", |ui| {
-                    let _ = ui.button(project.name.clone());
+                    let title = if self.project_modified {
+                        format!("{} *", project.name)
+                    } else {
+                        project.name.clone()
+                    };
+                    let _ = ui.button(title);
                 });
             }
         });
@@ -198,7 +227,12 @@ impl AurioApp {
         }
     }
 
-    fn draw_piano_roll(&self, ui: &mut egui::Ui, pattern: &StaticPattern, node_name: &str) {
+    fn draw_piano_roll(
+        &mut self,
+        ui: &mut egui::Ui,
+        pattern: &mut StaticPattern,
+        node_name: &str,
+    ) -> bool {
         ui.heading(format!("Piano Roll: {}", node_name));
 
         if ui.button("Close Piano Roll").clicked() {}
@@ -211,6 +245,7 @@ impl AurioApp {
         );
 
         let rect = response.rect;
+        let mut modified = false;
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
 
@@ -303,7 +338,8 @@ impl AurioApp {
             );
         }
 
-        for note in &pattern.notes {
+        let mut note_to_delete: Option<usize> = None;
+        for (idx, note) in pattern.notes.iter().enumerate() {
             if note.pitch < min_pitch || note.pitch >= max_pitch {
                 continue;
             }
@@ -331,6 +367,50 @@ impl AurioApp {
                 egui::Stroke::new(1.0, egui::Color32::WHITE),
                 egui::StrokeKind::Inside,
             );
+
+            if response.secondary_clicked() {
+                if let Some(click_pos) = response.interact_pointer_pos() {
+                    if note_rect.contains(click_pos) {
+                        note_to_delete = Some(idx);
+                    }
+                }
+            }
+        }
+
+        if let Some(idx) = note_to_delete {
+            pattern.notes.remove(idx);
+            modified = true;
+        }
+
+        if response.clicked() {
+            if let Some(click_pos) = response.interact_pointer_pos() {
+                if click_pos.x > rect.left() + piano_key_width {
+                    let relative_y = click_pos.y - rect.top();
+                    let pitch = max_pitch - (relative_y / row_height) as u8;
+
+                    if pitch >= min_pitch && pitch < max_pitch {
+                        let relative_x = click_pos.x - rect.left() - piano_key_width;
+                        let beat = (relative_x / pixels_per_beat).round();
+
+                        if beat < total_beats {
+                            let note_exists = pattern
+                                .notes
+                                .iter()
+                                .any(|n| n.pitch == pitch && (n.start_beat - beat).abs() < 0.1);
+
+                            if !note_exists {
+                                pattern.notes.push(crate::timing::Note {
+                                    pitch,
+                                    velocity: 100,
+                                    start_beat: beat,
+                                    duration_beats: 1.0,
+                                });
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         for bar in 0..pattern.duration_bars {
@@ -343,6 +423,8 @@ impl AurioApp {
                 egui::Color32::LIGHT_GRAY,
             );
         }
+
+        modified
     }
 }
 
@@ -368,20 +450,55 @@ impl eframe::App for AurioApp {
         }
 
         let mut close_piano_roll = false;
-        if let Some((track_id, node_id)) = &self.selected_node {
-            if let Some(ref project) = self.current_project {
-                if let Some(track) = project.tracks.iter().find(|t| t.id == *track_id) {
-                    if let Some(node) = track.graph.get_node(node_id) {
-                        if let Sequence::Static(pattern) = &node.sequence {
-                            egui::TopBottomPanel::bottom("piano_roll")
-                                .min_height(350.0)
-                                .show(ctx, |ui| {
-                                    if ui.button("✕ Close Piano Roll").clicked() {
-                                        close_piano_roll = true;
-                                    }
-                                    self.draw_piano_roll(ui, pattern, &node.id);
-                                });
+        let mut modified_pattern: Option<(usize, String, StaticPattern)> = None;
+
+        let piano_roll_data: Option<(usize, String, StaticPattern, String)> =
+            if let Some((track_id, node_id)) = &self.selected_node {
+                if let Some(ref project) = self.current_project {
+                    if let Some(track) = project.tracks.iter().find(|t| t.id == *track_id) {
+                        if let Some(node) = track.graph.get_node(node_id) {
+                            if let Sequence::Static(pattern) = &node.sequence {
+                                Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        if let Some((track_id, node_id, mut pattern, node_name)) = piano_roll_data {
+            egui::TopBottomPanel::bottom("piano_roll")
+                .min_height(350.0)
+                .show(ctx, |ui| {
+                    if ui.button("✕ Close Piano Roll").clicked() {
+                        close_piano_roll = true;
+                    }
+
+                    if self.draw_piano_roll(ui, &mut pattern, &node_name) {
+                        self.project_modified = true;
+                        modified_pattern = Some((track_id, node_id, pattern));
+                    }
+                });
+        }
+
+        if let Some((track_id, node_id, new_pattern)) = modified_pattern {
+            if let Some(ref mut project) = self.current_project {
+                if let Some(track) = project.tracks.iter_mut().find(|t| t.id == track_id) {
+                    if let Some(node) = track.graph.nodes.iter_mut().find(|n| n.id == node_id) {
+                        node.sequence = Sequence::Static(new_pattern);
+                        let _ = self
+                            .engine
+                            .command_tx
+                            .send(EngineCommand::ReloadProject(project.clone()));
                     }
                 }
             }

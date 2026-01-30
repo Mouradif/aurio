@@ -12,6 +12,7 @@ use std::sync::{
 #[derive(Debug, Clone)]
 pub enum EngineCommand {
     LoadProject(PathBuf),
+    ReloadProject(Project),
     Play,
     Pause,
     Stop,
@@ -87,7 +88,43 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                     });
                 }
             },
+            Ok(EngineCommand::ReloadProject(project)) => {
+                println!("Reloading project with updated sequences");
 
+                if let (Some(tracks), Some(queue), Some(counter), Some(lua)) = (
+                    &state.tracks,
+                    &state.event_queue,
+                    &state.sample_counter,
+                    &state.lua_runtime,
+                ) {
+                    let mut tracks_write = tracks.write();
+                    let current_sample = counter.load(Ordering::Relaxed);
+
+                    while queue.pop().is_some() {}
+
+                    for (i, track_data) in project.tracks.iter().enumerate() {
+                        if let Some(track) = tracks_write.get_mut(i) {
+                            let old_node = track.current_node.clone();
+                            track.graph = track_data.graph.clone();
+                            if let Some(node) = track.graph.get_node(&old_node) {
+                                timing::schedule_sequence_events(
+                                    &node.sequence,
+                                    i,
+                                    current_sample,
+                                    project.bpm,
+                                    project.sample_rate as f32,
+                                    queue,
+                                    Some(lua),
+                                );
+                            }
+                        }
+                    }
+
+                    println!("Hot-swapped and rescheduled sequences");
+                }
+
+                state.project = Some(project);
+            }
             Ok(EngineCommand::Play) => {
                 if let Some(ref project) = state.project {
                     if state.audio_stream.is_none() {

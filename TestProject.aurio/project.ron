@@ -1,79 +1,88 @@
 (
-  name: "Test Project",
-  version: "0.1.0",
-  bpm: 120.0,
-  sample_rate: 44100,
-  sample_library: [],
-  tracks: [
-    (
-      id: 0,
-      name: "Test Track",
-      instrument: MultiOsc(
-        oscillators: [
-          (
-            wave: Sine,
-            gain: 0.3,
-            semitone: 0,
-          ),
-        ],
-      ),
-      adsr: (
-        attack: 0.01,
-        decay: 0.1,
-        sustain: 0.7,
-        release: 0.2,
-      ),
-      volume: 1.0,
-      pan: 0.0,
-      initial_node: "node-a",
-      graph: (
-        nodes: [
-          (
-            id: "node-a",
-            sequence: Static((
-              duration_bars: 1,
-              time_signature: (4, 4),
-              notes: [
-                (pitch: 60, velocity: 100, start_beat: 0.0, duration_beats: 1.0),
-                (pitch: 64, velocity: 80, start_beat: 1.0, duration_beats: 1.0),
-                (pitch: 67, velocity: 90, start_beat: 2.0, duration_beats: 1.0),
-                (pitch: 72, velocity: 100, start_beat: 3.0, duration_beats: 1.0),
-              ],
-            )),
-            hooks: [],
-          ),
-          (
-            id: "node-b",
-            sequence: Generated((
-              duration_bars: 1,
-              time_signature: (4, 4),
-              function: "return {
-    { pitch = 60 + 9, velocity = 100, start_beat = 0.0, duration_beats = 1.0 },
-    { pitch = 72, velocity = 80, start_beat = 1.0, duration_beats = 1.0 },
-    { pitch = 76, velocity = 90, start_beat = 2.0, duration_beats = 1.0 },
-    { pitch = 81, velocity = 100, start_beat = 3.0, duration_beats = 1.0 },
-}",
-            )),
-            hooks: [],
-          ),
-        ],
-        edges: [
-          (
-            from: "node-a",
-            to: "node-b",
-            condition: "true",
-            timing: FinishSequence,
-            inlet_hook: None,
-          ),
-          (
-            from: "node-b",
-            to: "node-a",
-            condition: "true",
-            timing: FinishSequence,
-            inlet_hook: None,
-          ),
-        ],
-      ),
-    ),
-  ],
+    name: "Test Project",
+    version: "0.1.0",
+    bpm: 120.0,
+    sample_rate: 44100,
+    sample_library: [],
+    tracks: [
+        (
+            id: 0,
+            name: "Test Track",
+            instrument: MultiOsc(
+                oscillators: [
+                    (
+                        wave: Sine,
+                        gain: 0.3,
+                        semitone: 0,
+                    ),
+                ],
+            ),
+            adsr: (
+                attack: 0.01,
+                decay: 0.1,
+                sustain: 0.7,
+                release: 0.2,
+            ),
+            volume: 1.0,
+            pan: 0.0,
+            initial_node: "node-a",
+            graph: (
+                nodes: [
+                    (
+                        id: "node-a",
+                        sequence: Static((
+                            duration_bars: 1,
+                            time_signature: (4, 4),
+                            notes: [
+                                (
+                                    pitch: 60,
+                                    velocity: 100,
+                                    start_beat: 0.0,
+                                    duration_beats: 1.0,
+                                ),
+                                (
+                                    pitch: 67,
+                                    velocity: 90,
+                                    start_beat: 2.0,
+                                    duration_beats: 1.0,
+                                ),
+                                (
+                                    pitch: 72,
+                                    velocity: 100,
+                                    start_beat: 3.0,
+                                    duration_beats: 1.0,
+                                ),
+                            ],
+                        )),
+                        hooks: [],
+                    ),
+                    (
+                        id: "node-b",
+                        sequence: Generated((
+                            duration_bars: 1,
+                            time_signature: (4, 4),
+                            function: "return {\n    { pitch = 60 + 9, velocity = 100, start_beat = 0.0, duration_beats = 1.0 },\n    { pitch = 72, velocity = 80, start_beat = 1.0, duration_beats = 1.0 },\n    { pitch = 76, velocity = 90, start_beat = 2.0, duration_beats = 1.0 },\n    { pitch = 81, velocity = 100, start_beat = 3.0, duration_beats = 1.0 },\n}",
+                        )),
+                        hooks: [],
+                    ),
+                ],
+                edges: [
+                    (
+                        from: "node-a",
+                        to: "node-b",
+                        condition: "true",
+                        timing: FinishSequence,
+                        inlet_hook: None,
+                    ),
+                    (
+                        from: "node-b",
+                        to: "node-a",
+                        condition: "true",
+                        timing: FinishSequence,
+                        inlet_hook: None,
+                    ),
+                ],
+            ),
+        ),
+    ],
 )
