@@ -52,6 +52,12 @@
                                     start_beat: 3.0,
                                     duration_beats: 1.0,
                                 ),
+                                (
+                                    pitch: 62,
+                                    velocity: 100,
+                                    start_beat: 1.0,
+                                    duration_beats: 1.0,
+                                ),
                             ],
                         )),
                         hooks: [],

@@ -1,6 +1,9 @@
+mod piano_roll;
+
 use crate::timing::{Sequence, StaticPattern};
 use crate::{EngineCommand, EngineHandle, EngineUpdate, Project, TrackData};
 use eframe::egui;
+use piano_roll::{PianoRoll, PianoRollState};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -14,6 +17,7 @@ pub struct AurioApp {
     playing: bool,
     current_nodes: HashMap<usize, String>,
     project_modified: bool,
+    piano_roll_states: HashMap<(usize, String), PianoRollState>,
 }
 
 impl AurioApp {
@@ -28,6 +32,7 @@ impl AurioApp {
             playing: false,
             current_nodes: HashMap::new(),
             project_modified: false,
+            piano_roll_states: HashMap::new(),
         }
     }
 
@@ -226,206 +231,6 @@ impl AurioApp {
             }
         }
     }
-
-    fn draw_piano_roll(
-        &mut self,
-        ui: &mut egui::Ui,
-        pattern: &mut StaticPattern,
-        node_name: &str,
-    ) -> bool {
-        ui.heading(format!("Piano Roll: {}", node_name));
-
-        if ui.button("Close Piano Roll").clicked() {}
-
-        ui.separator();
-
-        let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(ui.available_width(), 300.0),
-            egui::Sense::click(),
-        );
-
-        let rect = response.rect;
-        let mut modified = false;
-
-        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
-
-        let piano_key_width = 60.0;
-        let min_pitch = 48; // C3
-        let max_pitch = 84; // C6
-        let pitch_range = max_pitch - min_pitch;
-        let row_height = rect.height() / pitch_range as f32;
-
-        let time_signature = pattern.time_signature;
-        let beats_per_bar = time_signature.0 as f32;
-        let total_beats = beats_per_bar * pattern.duration_bars as f32;
-
-        let grid_area_width = rect.width() - piano_key_width;
-        let pixels_per_beat = grid_area_width / total_beats;
-
-        for pitch in min_pitch..max_pitch {
-            let y = rect.top() + (max_pitch - pitch - 1) as f32 * row_height;
-            let key_rect = egui::Rect::from_min_size(
-                egui::Pos2::new(rect.left(), y),
-                egui::Vec2::new(piano_key_width, row_height),
-            );
-
-            let is_black_key = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
-            let key_color = if is_black_key {
-                egui::Color32::from_rgb(20, 20, 20)
-            } else {
-                egui::Color32::from_rgb(200, 200, 200)
-            };
-
-            painter.rect_filled(key_rect, 0.0, key_color);
-            painter.rect_stroke(
-                key_rect,
-                0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 100)),
-                egui::StrokeKind::Inside,
-            );
-
-            if pitch % 12 == 0 {
-                let octave = (pitch / 12) - 1;
-                let text_color = if is_black_key {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::BLACK
-                };
-                painter.text(
-                    key_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("C{}", octave),
-                    egui::FontId::proportional(10.0),
-                    text_color,
-                );
-            }
-        }
-
-        let grid_rect = egui::Rect::from_min_size(
-            egui::Pos2::new(rect.left() + piano_key_width, rect.top()),
-            egui::Vec2::new(grid_area_width, rect.height()),
-        );
-        painter.rect_filled(grid_rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
-
-        for beat in 0..=total_beats as i32 {
-            let x = rect.left() + piano_key_width + (beat as f32 * pixels_per_beat);
-
-            let is_bar_line = beat % beats_per_bar as i32 == 0;
-            let color = if is_bar_line {
-                egui::Color32::from_rgb(100, 100, 100)
-            } else {
-                egui::Color32::from_rgb(60, 60, 60)
-            };
-            let width = if is_bar_line { 2.0 } else { 1.0 };
-
-            painter.line_segment(
-                [
-                    egui::Pos2::new(x, rect.top()),
-                    egui::Pos2::new(x, rect.bottom()),
-                ],
-                egui::Stroke::new(width, color),
-            );
-        }
-
-        for pitch in min_pitch..=max_pitch {
-            let y = rect.top() + (max_pitch - pitch) as f32 * row_height;
-            painter.line_segment(
-                [
-                    egui::Pos2::new(rect.left() + piano_key_width, y),
-                    egui::Pos2::new(rect.right(), y),
-                ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)),
-            );
-        }
-
-        let mut note_to_delete: Option<usize> = None;
-        for (idx, note) in pattern.notes.iter().enumerate() {
-            if note.pitch < min_pitch || note.pitch >= max_pitch {
-                continue;
-            }
-
-            let note_x = rect.left() + piano_key_width + (note.start_beat * pixels_per_beat);
-            let note_width = note.duration_beats * pixels_per_beat;
-            let note_y = rect.top() + (max_pitch - note.pitch - 1) as f32 * row_height;
-
-            let note_rect = egui::Rect::from_min_size(
-                egui::Pos2::new(note_x, note_y),
-                egui::Vec2::new(note_width, row_height),
-            );
-
-            let velocity_factor = note.velocity as f32 / 127.0;
-            let note_color = egui::Color32::from_rgb(
-                (100.0 + 155.0 * velocity_factor) as u8,
-                (150.0 + 105.0 * velocity_factor) as u8,
-                (200.0 + 55.0 * velocity_factor) as u8,
-            );
-
-            painter.rect_filled(note_rect, 2.0, note_color);
-            painter.rect_stroke(
-                note_rect,
-                2.0,
-                egui::Stroke::new(1.0, egui::Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
-
-            if response.secondary_clicked() {
-                if let Some(click_pos) = response.interact_pointer_pos() {
-                    if note_rect.contains(click_pos) {
-                        note_to_delete = Some(idx);
-                    }
-                }
-            }
-        }
-
-        if let Some(idx) = note_to_delete {
-            pattern.notes.remove(idx);
-            modified = true;
-        }
-
-        if response.clicked() {
-            if let Some(click_pos) = response.interact_pointer_pos() {
-                if click_pos.x > rect.left() + piano_key_width {
-                    let relative_y = click_pos.y - rect.top();
-                    let pitch = max_pitch - (relative_y / row_height) as u8;
-
-                    if pitch >= min_pitch && pitch < max_pitch {
-                        let relative_x = click_pos.x - rect.left() - piano_key_width;
-                        let beat = (relative_x / pixels_per_beat).round();
-
-                        if beat < total_beats {
-                            let note_exists = pattern
-                                .notes
-                                .iter()
-                                .any(|n| n.pitch == pitch && (n.start_beat - beat).abs() < 0.1);
-
-                            if !note_exists {
-                                pattern.notes.push(crate::timing::Note {
-                                    pitch,
-                                    velocity: 100,
-                                    start_beat: beat,
-                                    duration_beats: 1.0,
-                                });
-                                modified = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for bar in 0..pattern.duration_bars {
-            let x = rect.left() + piano_key_width + (bar as f32 * beats_per_bar * pixels_per_beat);
-            painter.text(
-                egui::Pos2::new(x + 5.0, rect.top() + 10.0),
-                egui::Align2::LEFT_TOP,
-                format!("Bar {}", bar + 1),
-                egui::FontId::proportional(10.0),
-                egui::Color32::LIGHT_GRAY,
-            );
-        }
-
-        modified
-    }
 }
 
 fn node_position(index: usize) -> egui::Pos2 {
@@ -476,14 +281,27 @@ impl eframe::App for AurioApp {
             };
 
         if let Some((track_id, node_id, mut pattern, node_name)) = piano_roll_data {
+            let state_key = (track_id, node_id.clone());
+            let state = self
+                .piano_roll_states
+                .entry(state_key)
+                .or_insert_with(PianoRollState::default);
+            if state.vertical_zoom == 20.0 && state.horizontal_zoom == 50.0 {
+                state.fit_to_pattern(&pattern, egui::Vec2::new(800.0, 300.0));
+            }
             egui::TopBottomPanel::bottom("piano_roll")
                 .min_height(350.0)
                 .show(ctx, |ui| {
-                    if ui.button("✕ Close Piano Roll").clicked() {
-                        close_piano_roll = true;
-                    }
+                    ui.horizontal(|ui| {
+                        ui.heading(format!("Piano Roll: {}", node_name));
+                        if ui.button("✕ Close").clicked() {
+                            close_piano_roll = true;
+                        }
+                    });
 
-                    if self.draw_piano_roll(ui, &mut pattern, &node_name) {
+                    let response = PianoRoll::new(&mut pattern, state).show(ui);
+
+                    if response.modified {
                         self.project_modified = true;
                         modified_pattern = Some((track_id, node_id, pattern));
                     }
