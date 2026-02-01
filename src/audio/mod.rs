@@ -3,7 +3,7 @@ mod track;
 mod voice;
 
 pub use instrument::{Instrument, OscConfig, Wave};
-pub use track::Track;
+pub use track::{NotePlaybackState, PlaybackState, TrackConfig};
 pub use voice::{ADSRConfig, EnvelopeState, NoteState};
 
 pub fn midi_to_freq(note: u8) -> f32 {

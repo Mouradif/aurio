@@ -12,6 +12,9 @@ pub enum Event {
         velocity: u8,
         is_note_on: bool,
     },
+    StopAllNotes {
+        track_id: usize,
+    },
     NodeTransition {
         track_id: usize,
         new_node_id: String,

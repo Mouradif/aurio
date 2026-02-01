@@ -1,8 +1,11 @@
 use crate::{Project, audio, events, scripting, timing};
+use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::{Receiver, Sender};
-use crossbeam::queue::ArrayQueue;
-use parking_lot::RwLock;
+use ringbuf::{
+    HeapCons, HeapProd, HeapRb,
+    traits::{Consumer, Producer, Split},
+};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -48,8 +51,7 @@ pub fn spawn_engine() -> EngineHandle {
 
 struct EngineState {
     project: Option<Project>,
-    tracks: Option<Arc<RwLock<Vec<audio::Track>>>>,
-    event_queue: Option<Arc<ArrayQueue<events::ScheduledEvent>>>,
+    track_configs: Option<Arc<ArcSwap<Vec<audio::TrackConfig>>>>,
     sample_counter: Option<Arc<AtomicU64>>,
     lua_runtime: Option<scripting::LuaRuntime>,
     audio_stream: Option<cpal::Stream>,
@@ -59,8 +61,7 @@ struct EngineState {
 fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUpdate>) {
     let mut state = EngineState {
         project: None,
-        tracks: None,
-        event_queue: None,
+        track_configs: None,
         sample_counter: None,
         lua_runtime: None,
         audio_stream: None,
@@ -91,36 +92,24 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
             Ok(EngineCommand::ReloadProject(project)) => {
                 println!("Reloading project with updated sequences");
 
-                if let (Some(tracks), Some(queue), Some(counter), Some(lua)) = (
-                    &state.tracks,
-                    &state.event_queue,
-                    &state.sample_counter,
-                    &state.lua_runtime,
-                ) {
-                    let mut tracks_write = tracks.write();
-                    let current_sample = counter.load(Ordering::Relaxed);
+                if let Some(ref track_configs) = state.track_configs {
+                    let new_configs: Vec<audio::TrackConfig> = project
+                        .tracks
+                        .iter()
+                        .map(|track_data| {
+                            let mut config = audio::TrackConfig::new(
+                                track_data.id,
+                                track_data.instrument.clone(),
+                                track_data.adsr.clone(),
+                            );
+                            config.volume = track_data.volume;
+                            config.pan = track_data.pan;
+                            config
+                        })
+                        .collect();
 
-                    while queue.pop().is_some() {}
-
-                    for (i, track_data) in project.tracks.iter().enumerate() {
-                        if let Some(track) = tracks_write.get_mut(i) {
-                            let old_node = track.current_node.clone();
-                            track.graph = track_data.graph.clone();
-                            if let Some(node) = track.graph.get_node(&old_node) {
-                                timing::schedule_sequence_events(
-                                    &node.sequence,
-                                    i,
-                                    current_sample,
-                                    project.bpm,
-                                    project.sample_rate as f32,
-                                    queue,
-                                    Some(lua),
-                                );
-                            }
-                        }
-                    }
-
-                    println!("Hot-swapped and rescheduled sequences");
+                    track_configs.store(Arc::new(new_configs));
+                    println!("Hot-swapped track configs");
                 }
 
                 state.project = Some(project);
@@ -129,10 +118,9 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 if let Some(ref project) = state.project {
                     if state.audio_stream.is_none() {
                         match setup_audio(project) {
-                            Ok((stream, tracks, queue, counter, lua)) => {
+                            Ok((stream, configs, counter, lua)) => {
                                 state.audio_stream = Some(stream);
-                                state.tracks = Some(tracks);
-                                state.event_queue = Some(queue);
+                                state.track_configs = Some(configs);
                                 state.sample_counter = Some(counter);
                                 state.lua_runtime = Some(lua);
                                 state.playing = true;
@@ -160,8 +148,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
 
             Ok(EngineCommand::Stop) => {
                 state.audio_stream = None;
-                state.tracks = None;
-                state.event_queue = None;
+                state.track_configs = None;
                 state.sample_counter = None;
                 state.playing = false;
                 let _ = update_tx.send(EngineUpdate::PlaybackState { playing: false });
@@ -179,20 +166,22 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
         }
-
-        if state.playing {
-            if let Some(ref tracks) = state.tracks {
-                let tracks_read = tracks.read();
-                let current_nodes: Vec<(usize, String)> = tracks_read
-                    .iter()
-                    .map(|t| (t.id, t.current_node.clone()))
-                    .collect();
-                let _ = update_tx.send(EngineUpdate::CurrentNodes {
-                    track_nodes: current_nodes,
-                });
-            }
-        }
     }
+}
+
+struct TimingState {
+    graphs: Vec<timing::StateGraph>,
+    current_nodes: Vec<String>,
+    sequence_end_samples: Vec<u64>,
+}
+
+struct AudioState {
+    playback_states: Vec<audio::PlaybackState>,
+    pending_event: Option<events::ScheduledEvent>,
+    consumer: HeapCons<events::ScheduledEvent>,
+    track_configs: Arc<ArcSwap<Vec<audio::TrackConfig>>>,
+    sample_rate: f32,
+    num_channels: usize,
 }
 
 fn setup_audio(
@@ -200,8 +189,7 @@ fn setup_audio(
 ) -> Result<
     (
         cpal::Stream,
-        Arc<RwLock<Vec<audio::Track>>>,
-        Arc<ArrayQueue<events::ScheduledEvent>>,
+        Arc<ArcSwap<Vec<audio::TrackConfig>>>,
         Arc<AtomicU64>,
         scripting::LuaRuntime,
     ),
@@ -209,52 +197,70 @@ fn setup_audio(
 > {
     let lua_runtime = scripting::LuaRuntime::new()?;
 
-    let mut tracks_vec = Vec::new();
-    for track_data in &project.tracks {
-        let mut track = audio::Track::new(
-            track_data.id,
-            track_data.instrument.clone(),
-            track_data.adsr.clone(),
-        );
-        track.volume = track_data.volume;
-        track.pan = track_data.pan;
-        track.graph = track_data.graph.clone();
-        track.current_node = track_data.initial_node.clone();
-        tracks_vec.push(track);
-    }
+    let track_configs: Vec<audio::TrackConfig> = project
+        .tracks
+        .iter()
+        .map(|track_data| {
+            let mut config = audio::TrackConfig::new(
+                track_data.id,
+                track_data.instrument.clone(),
+                track_data.adsr.clone(),
+            );
+            config.volume = track_data.volume;
+            config.pan = track_data.pan;
+            config
+        })
+        .collect();
 
-    let tracks = Arc::new(RwLock::new(tracks_vec));
-    let event_queue = Arc::new(ArrayQueue::new(1024));
+    let track_configs = Arc::new(ArcSwap::from_pointee(track_configs));
     let sample_counter = Arc::new(AtomicU64::new(0));
 
     let bpm = project.bpm;
     let sample_rate = project.sample_rate as f32;
 
+    let ring_buffer = HeapRb::<events::ScheduledEvent>::new(4096);
+    let (mut producer, consumer) = ring_buffer.split();
+
+    let mut timing_state = TimingState {
+        graphs: project.tracks.iter().map(|t| t.graph.clone()).collect(),
+        current_nodes: project
+            .tracks
+            .iter()
+            .map(|t| t.initial_node.clone())
+            .collect(),
+        sequence_end_samples: Vec::new(),
+    };
+
+    for (track_id, (graph, current_node)) in timing_state
+        .graphs
+        .iter()
+        .zip(timing_state.current_nodes.iter())
+        .enumerate()
     {
-        let tracks_read = tracks.read();
-        for (track_id, track) in tracks_read.iter().enumerate() {
-            let node = track.graph.get_node(&track.current_node).unwrap();
-            timing::schedule_sequence_events(
+        if let Some(node) = graph.get_node(current_node) {
+            let _ = timing::schedule_sequence_events(
                 &node.sequence,
                 track_id,
                 0,
                 bpm,
                 sample_rate,
-                &event_queue,
+                &mut producer,
                 Some(&lua_runtime),
             );
+            let duration = node.sequence.duration_samples(bpm, sample_rate);
+            timing_state.sequence_end_samples.push(duration as u64);
+        } else {
+            timing_state.sequence_end_samples.push(u64::MAX);
         }
     }
 
-    let tracks_timing = tracks.clone();
-    let queue_timing = event_queue.clone();
     let counter_timing = sample_counter.clone();
     let lua_timing = scripting::LuaRuntime::new()?;
 
     std::thread::spawn(move || {
         timing_thread(
-            tracks_timing,
-            queue_timing,
+            timing_state,
+            producer,
             counter_timing,
             bpm,
             sample_rate,
@@ -265,21 +271,35 @@ fn setup_audio(
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or("No output device")?;
     let config = device.default_output_config()?;
+    let stream_config: cpal::StreamConfig = config.into();
 
-    let tracks_audio = tracks.clone();
-    let queue_audio = event_queue.clone();
+    let num_channels = stream_config.channels as usize;
+    println!(
+        "Audio output: {} channels, {} Hz",
+        num_channels, sample_rate
+    );
+
+    let configs_snapshot = track_configs.load();
+    let playback_states: Vec<audio::PlaybackState> = configs_snapshot
+        .iter()
+        .map(|_| audio::PlaybackState::new())
+        .collect();
+
+    let mut audio_state = AudioState {
+        playback_states,
+        pending_event: None,
+        consumer,
+        track_configs: track_configs.clone(),
+        sample_rate,
+        num_channels,
+    };
+
     let counter_audio = sample_counter.clone();
 
     let stream = device.build_output_stream(
-        &config.into(),
+        &stream_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            audio_callback(
-                data,
-                &tracks_audio,
-                &queue_audio,
-                &counter_audio,
-                sample_rate,
-            );
+            audio_callback(data, &mut audio_state, &counter_audio);
         },
         |err| eprintln!("Audio error: {}", err),
         None,
@@ -287,127 +307,177 @@ fn setup_audio(
 
     stream.play()?;
 
-    Ok((stream, tracks, event_queue, sample_counter, lua_runtime))
+    Ok((stream, track_configs, sample_counter, lua_runtime))
 }
 
 fn timing_thread(
-    tracks: Arc<RwLock<Vec<audio::Track>>>,
-    event_queue: Arc<ArrayQueue<events::ScheduledEvent>>,
+    mut state: TimingState,
+    mut producer: HeapProd<events::ScheduledEvent>,
     sample_counter: Arc<AtomicU64>,
     bpm: f32,
     sample_rate: f32,
     lua_runtime: scripting::LuaRuntime,
 ) {
-    let mut sequence_end_samples: Vec<Option<u64>> = vec![None; 10]; // Max 10 tracks for now
-
-    {
-        let tracks_read = tracks.read();
-        for (track_id, track) in tracks_read.iter().enumerate() {
-            let node = track.graph.get_node(&track.current_node).unwrap();
-            let duration = node.sequence.duration_samples(bpm, sample_rate);
-            sequence_end_samples[track_id] = Some(duration as u64);
-        }
-    }
-
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-
         let current_sample = sample_counter.load(Ordering::Relaxed);
-        let mut tracks_write = tracks.write();
 
-        for track_id in 0..tracks_write.len() {
-            if let Some(end_sample) = sequence_end_samples[track_id] {
-                if current_sample >= end_sample {
-                    let track = &mut tracks_write[track_id];
-                    let current_node = track.current_node.clone();
-                    let edges = track.graph.get_outgoing_edges(&current_node);
+        for track_id in 0..state.graphs.len() {
+            let end_sample = state.sequence_end_samples[track_id];
+            if current_sample >= end_sample {
+                let current_node = &state.current_nodes[track_id];
+                let graph = &state.graphs[track_id];
+                let edges = graph.get_outgoing_edges(current_node);
 
-                    if let Some(edge) = edges.first() {
-                        let next_node = edge.to.clone();
+                let next_node = if let Some(edge) = edges.first() {
+                    edge.to.clone()
+                } else {
+                    current_node.clone()
+                };
 
-                        println!("Transitioning from {} to {}", current_node, next_node);
+                println!(
+                    "Track {}: transitioning from {} to {}",
+                    track_id, current_node, next_node
+                );
 
-                        track.stop_all_notes();
-                        track.current_node = next_node.clone();
+                let _ = producer.try_push(events::ScheduledEvent {
+                    sample_timestamp: current_sample,
+                    event: events::Event::StopAllNotes { track_id },
+                });
 
-                        let node = track.graph.get_node(&track.current_node).unwrap();
-                        let new_start = current_sample;
+                state.current_nodes[track_id] = next_node.clone();
 
-                        timing::schedule_sequence_events(
-                            &node.sequence,
-                            track_id,
-                            new_start,
-                            bpm,
-                            sample_rate,
-                            &event_queue,
-                            Some(&lua_runtime),
-                        );
+                if let Some(node) = graph.get_node(&next_node) {
+                    let _ = timing::schedule_sequence_events(
+                        &node.sequence,
+                        track_id,
+                        current_sample,
+                        bpm,
+                        sample_rate,
+                        &mut producer,
+                        Some(&lua_runtime),
+                    );
 
-                        let duration = node.sequence.duration_samples(bpm, sample_rate);
-                        sequence_end_samples[track_id] = Some(new_start + duration as u64);
-                    } else {
-                        let node = track.graph.get_node(&track.current_node).unwrap();
-                        let new_start = current_sample;
-
-                        timing::schedule_sequence_events(
-                            &node.sequence,
-                            track_id,
-                            new_start,
-                            bpm,
-                            sample_rate,
-                            &event_queue,
-                            Some(&lua_runtime),
-                        );
-
-                        let duration = node.sequence.duration_samples(bpm, sample_rate);
-                        sequence_end_samples[track_id] = Some(new_start + duration as u64);
-                    }
+                    let duration = node.sequence.duration_samples(bpm, sample_rate);
+                    state.sequence_end_samples[track_id] = current_sample + duration as u64;
                 }
             }
         }
     }
 }
 
-fn audio_callback(
-    data: &mut [f32],
-    tracks: &Arc<RwLock<Vec<audio::Track>>>,
-    event_queue: &Arc<ArrayQueue<events::ScheduledEvent>>,
-    sample_counter: &Arc<AtomicU64>,
-    sample_rate: f32,
-) {
+fn audio_callback(data: &mut [f32], state: &mut AudioState, sample_counter: &Arc<AtomicU64>) {
+    let num_frames = data.len() / state.num_channels;
     let current_sample = sample_counter.load(Ordering::Relaxed);
-    let mut tracks_write = tracks.write();
+    let buffer_end = current_sample + num_frames as u64;
 
-    while let Some(event) = event_queue.pop() {
-        if event.sample_timestamp >= current_sample + data.len() as u64 {
-            let _ = event_queue.push(event);
-            break;
-        }
-
-        match event.event {
-            events::Event::MidiEvent {
-                track_id,
-                pitch,
-                velocity,
-                is_note_on,
-            } => {
-                if track_id < tracks_write.len() {
-                    if is_note_on {
-                        tracks_write[track_id].note_on(pitch, velocity);
-                    } else {
-                        tracks_write[track_id].note_off(pitch);
-                    }
-                }
-            }
-            events::Event::NodeTransition { .. } => {}
+    let configs = state.track_configs.load();
+    let mut events: Vec<events::ScheduledEvent> = Vec::with_capacity(64);
+    if let Some(ev) = state.pending_event.take() {
+        if ev.sample_timestamp < buffer_end {
+            events.push(ev);
+        } else {
+            state.pending_event = Some(ev);
         }
     }
 
+    while state.pending_event.is_none() {
+        match state.consumer.try_pop() {
+            Some(ev) if ev.sample_timestamp < buffer_end => events.push(ev),
+            Some(ev) => {
+                state.pending_event = Some(ev);
+                break;
+            }
+            None => break,
+        }
+    }
+
+    events.sort_by_key(|e| e.sample_timestamp);
     data.fill(0.0);
 
-    for track in tracks_write.iter_mut() {
-        track.render_audio(data, sample_rate);
+    let mut frame = 0;
+    let mut event_idx = 0;
+
+    while frame < num_frames {
+        while event_idx < events.len() {
+            let event_frame = events[event_idx]
+                .sample_timestamp
+                .saturating_sub(current_sample) as usize;
+            if event_frame > frame {
+                break;
+            }
+            process_event(&mut state.playback_states, &configs, &events[event_idx]);
+            event_idx += 1;
+        }
+
+        render_frame(
+            &mut data[frame * state.num_channels..(frame + 1) * state.num_channels],
+            &mut state.playback_states,
+            &configs,
+            state.sample_rate,
+        );
+        frame += 1;
     }
 
-    sample_counter.fetch_add(data.len() as u64, Ordering::Relaxed);
+    sample_counter.fetch_add(num_frames as u64, Ordering::Relaxed);
+}
+
+fn process_event(
+    playback_states: &mut [audio::PlaybackState],
+    configs: &[audio::TrackConfig],
+    event: &events::ScheduledEvent,
+) {
+    match &event.event {
+        events::Event::MidiEvent {
+            track_id,
+            pitch,
+            velocity,
+            is_note_on,
+        } => {
+            if *track_id < playback_states.len() {
+                if *is_note_on {
+                    let num_oscs = configs.get(*track_id).map_or(0, |c| c.num_oscillators());
+                    playback_states[*track_id].note_on(*pitch, *velocity, num_oscs);
+                } else {
+                    playback_states[*track_id].note_off(*pitch);
+                }
+            }
+        }
+        events::Event::StopAllNotes { track_id } => {
+            if *track_id < playback_states.len() {
+                playback_states[*track_id].stop_all();
+            }
+        }
+        events::Event::NodeTransition { .. } => {}
+    }
+}
+
+fn render_frame(
+    output: &mut [f32],
+    states: &mut [audio::PlaybackState],
+    configs: &[audio::TrackConfig],
+    sample_rate: f32,
+) {
+    for (state, config) in states.iter_mut().zip(configs.iter()) {
+        let sample = state.render_sample(config, sample_rate);
+
+        let (l_gain, r_gain) = pan_to_gains(config.pan);
+
+        let left = sample * l_gain * config.volume;
+        let right = sample * r_gain * config.volume;
+
+        if output.len() >= 2 {
+            output[0] += left;
+            output[1] += right;
+        } else if !output.is_empty() {
+            output[0] += sample * config.volume;
+        }
+    }
+}
+
+fn pan_to_gains(pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4; // 0 to PI/2
+    let l_gain = angle.cos();
+    let r_gain = angle.sin();
+    (l_gain, r_gain)
 }
