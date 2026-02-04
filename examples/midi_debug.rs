@@ -65,4 +65,3 @@ fn print_midi(timestamp: u64, msg: &[u8]) {
         }
     }
 }
-

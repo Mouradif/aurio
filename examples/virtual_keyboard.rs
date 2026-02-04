@@ -112,4 +112,3 @@ enum NoteEvent {
     NoteOn(f32),
     NoteOff,
 }
-

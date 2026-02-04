@@ -1,5 +1,5 @@
 use super::Sequence;
-use crate::events::{Event, ScheduledEvent};
+use crate::events::{Event, MidiMessage, ScheduledEvent};
 use ringbuf::traits::Producer;
 
 pub type EventProducer = ringbuf::HeapProd<ScheduledEvent>;
@@ -13,10 +13,8 @@ pub fn schedule_sequence_events(
     producer: &mut EventProducer,
     lua_runtime: Option<&crate::scripting::LuaRuntime>,
 ) -> Result<(), SchedulerError> {
-    let notes = match sequence {
-        Sequence::Static(pattern) => pattern.notes.clone(),
-        Sequence::Generated(_pattern) => sequence.get_notes(lua_runtime),
-    };
+    // Invariant: there is no overlap of notes of the same pitch
+    let notes = sequence.get_notes(lua_runtime);
 
     let samples_per_beat = (60.0 / bpm) * sample_rate;
     let sequence_duration = sequence.duration_samples(bpm, sample_rate) as u64;
@@ -31,9 +29,10 @@ pub fn schedule_sequence_events(
                 sample_timestamp: note_on_sample,
                 event: Event::MidiEvent {
                     track_id,
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                    is_note_on: true,
+                    message: MidiMessage::NoteOn {
+                        pitch: note.pitch,
+                        velocity: note.velocity,
+                    },
                 },
             });
         }
@@ -46,9 +45,7 @@ pub fn schedule_sequence_events(
                 sample_timestamp: note_off_sample,
                 event: Event::MidiEvent {
                     track_id,
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                    is_note_on: false,
+                    message: MidiMessage::NoteOff { pitch: note.pitch },
                 },
             });
         }
