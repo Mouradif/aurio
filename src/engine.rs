@@ -69,7 +69,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
     };
 
     loop {
-        match command_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+        match command_rx.recv() {
             Ok(EngineCommand::LoadProject(path)) => match Project::load(&path) {
                 Ok(project) => {
                     println!("Project loaded successfully");
@@ -161,10 +161,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 // TODO
             }
 
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                // Timeout - continue to send updates
-            }
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam::channel::RecvError) => break,
         }
     }
 }
