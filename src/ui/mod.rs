@@ -258,24 +258,13 @@ impl eframe::App for AurioApp {
         let mut modified_pattern: Option<(usize, String, StaticPattern)> = None;
 
         let piano_roll_data: Option<(usize, String, StaticPattern, String)> =
-            if let Some((track_id, node_id)) = &self.selected_node {
-                if let Some(ref project) = self.current_project {
-                    if let Some(track) = project.tracks.iter().find(|t| t.id == *track_id) {
-                        if let Some(node) = track.graph.get_node(node_id) {
-                            if let Sequence::Static(pattern) = &node.sequence {
-                                Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            if let Some((track_id, node_id)) = &self.selected_node
+                && let Some(ref project) = self.current_project
+                && let Some(track) = project.tracks.iter().find(|t| t.id == *track_id)
+                && let Some(node) = track.graph.get_node(&node_id)
+                && let Sequence::Static(pattern) = &node.sequence
+            {
+                Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
             } else {
                 None
             };
@@ -308,18 +297,16 @@ impl eframe::App for AurioApp {
                 });
         }
 
-        if let Some((track_id, node_id, new_pattern)) = modified_pattern {
-            if let Some(ref mut project) = self.current_project {
-                if let Some(track) = project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(node) = track.graph.nodes.iter_mut().find(|n| n.id == node_id) {
-                        node.sequence = Sequence::Static(new_pattern);
-                        let _ = self
-                            .engine
-                            .command_tx
-                            .send(EngineCommand::ReloadProject(project.clone()));
-                    }
-                }
-            }
+        if let Some((track_id, node_id, new_pattern)) = modified_pattern
+            && let Some(ref mut project) = self.current_project
+            && let Some(track) = project.tracks.iter_mut().find(|t| t.id == track_id)
+            && let Some(node) = track.graph.nodes.iter_mut().find(|n| n.id == node_id)
+        {
+            node.sequence = Sequence::Static(new_pattern);
+            let _ = self
+                .engine
+                .command_tx
+                .send(EngineCommand::ReloadProject(project.clone()));
         }
 
         if close_piano_roll {
@@ -348,18 +335,18 @@ impl eframe::App for AurioApp {
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(track_idx) = self.selected_track {
-                    if let Some(ref project) = self.current_project {
-                        if let Some(track) = project.tracks.get(track_idx) {
-                            ui.heading(format!("Graph: {}", track.name));
-                            ui.label(format!("BPM: {}", project.bpm));
-                            if let Some(current) = self.current_nodes.get(&track.id) {
-                                ui.label(format!("▶ Currently playing: {}", current));
-                            }
-                            ui.separator();
-
-                            let track_clone = track.clone();
-                            self.draw_graph(ui, &track_clone);
+                    if let Some(ref project) = self.current_project
+                        && let Some(track) = project.tracks.get(track_idx)
+                    {
+                        ui.heading(format!("Graph: {}", track.name));
+                        ui.label(format!("BPM: {}", project.bpm));
+                        if let Some(current) = self.current_nodes.get(&track.id) {
+                            ui.label(format!("▶ Currently playing: {}", current));
                         }
+                        ui.separator();
+
+                        let track_clone = track.clone();
+                        self.draw_graph(ui, &track_clone);
                     }
                 } else {
                     ui.vertical_centered(|ui| {
