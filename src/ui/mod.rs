@@ -65,8 +65,8 @@ impl AurioApp {
                     ui.close();
                 }
 
-                if ui.button("Open Project...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Open Project...").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .set_title("Open Aurio Project")
                         .pick_folder()
                     {
@@ -77,7 +77,6 @@ impl AurioApp {
                             .send(EngineCommand::LoadProject(path));
                         ui.close();
                     }
-                }
 
                 let save_button = if self.project_modified {
                     ui.button("💾 Save Project *")
@@ -126,10 +125,8 @@ impl AurioApp {
                 if ui.button("⏸ Pause").clicked() {
                     let _ = self.engine.command_tx.send(EngineCommand::Pause);
                 }
-            } else {
-                if ui.button("▶ Play").clicked() {
-                    let _ = self.engine.command_tx.send(EngineCommand::Play);
-                }
+            } else if ui.button("▶ Play").clicked() {
+                let _ = self.engine.command_tx.send(EngineCommand::Play);
             }
 
             if ui.button("⏹ Stop").clicked() {
@@ -222,13 +219,11 @@ impl AurioApp {
                 egui::Color32::LIGHT_GRAY,
             );
 
-            if response.clicked() {
-                if let Some(click_pos) = response.interact_pointer_pos() {
-                    if rect.contains(click_pos) {
+            if response.clicked()
+                && let Some(click_pos) = response.interact_pointer_pos()
+                    && rect.contains(click_pos) {
                         self.selected_node = Some((track.id, node.id.clone()));
                     }
-                }
-            }
         }
     }
 }
@@ -261,7 +256,7 @@ impl eframe::App for AurioApp {
             if let Some((track_id, node_id)) = &self.selected_node
                 && let Some(ref project) = self.current_project
                 && let Some(track) = project.tracks.iter().find(|t| t.id == *track_id)
-                && let Some(node) = track.graph.get_node(&node_id)
+                && let Some(node) = track.graph.get_node(node_id)
                 && let Sequence::Static(pattern) = &node.sequence
             {
                 Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
@@ -274,7 +269,7 @@ impl eframe::App for AurioApp {
             let state = self
                 .piano_roll_states
                 .entry(state_key)
-                .or_insert_with(PianoRollState::default);
+                .or_default();
             if state.vertical_zoom == 20.0 && state.horizontal_zoom == 50.0 {
                 state.fit_to_pattern(&pattern, egui::Vec2::new(800.0, 300.0));
             }

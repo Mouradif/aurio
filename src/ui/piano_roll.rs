@@ -313,13 +313,11 @@ impl<'a> PianoRoll<'a> {
                 egui::StrokeKind::Inside,
             );
 
-            if response.secondary_clicked() {
-                if let Some(click_pos) = response.interact_pointer_pos() {
-                    if note_rect.contains(click_pos) {
+            if response.secondary_clicked()
+                && let Some(click_pos) = response.interact_pointer_pos()
+                    && note_rect.contains(click_pos) {
                         note_to_delete = Some(idx);
                     }
-                }
-            }
         }
 
         if let Some(idx) = note_to_delete {
@@ -327,9 +325,9 @@ impl<'a> PianoRoll<'a> {
             modification = Some(NoteModification::Deleted);
         }
 
-        if response.clicked() {
-            if let Some(click_pos) = response.interact_pointer_pos() {
-                if click_pos.x > rect.left() + piano_key_width {
+        if response.clicked()
+            && let Some(click_pos) = response.interact_pointer_pos()
+                && click_pos.x > rect.left() + piano_key_width {
                     let pitch = self.screen_y_to_pitch(click_pos.y, rect);
                     let beat = self.screen_x_to_beat(click_pos.x, rect, piano_key_width);
 
@@ -357,8 +355,6 @@ impl<'a> PianoRoll<'a> {
                         }
                     }
                 }
-            }
-        }
 
         modification
     }

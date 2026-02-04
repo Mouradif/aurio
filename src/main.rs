@@ -1,5 +1,5 @@
 use aurio::{AurioApp, spawn_engine};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::EnvFilter;
 
 fn main() {
     tracing_subscriber::fmt()
