@@ -79,4 +79,3 @@ fn run<T: cpal::SizedSample + cpal::FromSample<f32>>(
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
-
