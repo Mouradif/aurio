@@ -1,6 +1,13 @@
 use aurio::{AurioApp, spawn_engine};
+use tracing_subscriber::{EnvFilter, fmt};
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
     let engine = spawn_engine();
 
     let icon_image = image::open("assets/icon.png")

@@ -89,8 +89,8 @@ impl Sequence {
                 if let Some(runtime) = lua_runtime {
                     runtime
                         .execute_pattern(&pattern.function)
-                        .unwrap_or_else(|e| {
-                            eprintln!("Lua error: {}", e);
+                        .unwrap_or_else(|err| {
+                            tracing::error!(err = %err, "Lua error");
                             Vec::new()
                         })
                 } else {

@@ -72,7 +72,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
         match command_rx.recv() {
             Ok(EngineCommand::LoadProject(path)) => match Project::load(&path) {
                 Ok(project) => {
-                    println!("Project loaded successfully");
+                    tracing::info!("Project loaded successfully");
 
                     state.audio_stream = None;
                     state.playing = false;
@@ -90,7 +90,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 }
             },
             Ok(EngineCommand::ReloadProject(project)) => {
-                println!("Reloading project with updated sequences");
+                tracing::debug!("Reloading project with updated sequences");
 
                 if let Some(ref track_configs) = state.track_configs {
                     let new_configs: Vec<audio::TrackConfig> = project
@@ -109,7 +109,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                         .collect();
 
                     track_configs.store(Arc::new(new_configs));
-                    println!("Hot-swapped track configs");
+                    tracing::debug!("Hot-swapped track configs");
                 }
 
                 state.project = Some(project);
@@ -271,10 +271,6 @@ fn setup_audio(
     let stream_config: cpal::StreamConfig = config.into();
 
     let num_channels = stream_config.channels as usize;
-    println!(
-        "Audio output: {} channels, {} Hz",
-        num_channels, sample_rate
-    );
 
     let configs_snapshot = track_configs.load();
     let playback_states: Vec<audio::PlaybackState> = configs_snapshot
@@ -298,7 +294,7 @@ fn setup_audio(
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             audio_callback(data, &mut audio_state, &counter_audio);
         },
-        |err| eprintln!("Audio error: {}", err),
+        |err| tracing::error!(err = %err, "Audio error"),
         None,
     )?;
 
@@ -331,9 +327,11 @@ fn timing_thread(
                     current_node.clone()
                 };
 
-                println!(
-                    "Track {}: transitioning from {} to {}",
-                    track_id, current_node, next_node
+                tracing::debug!(
+                    track_id = %track_id,
+                    current_node = %current_node,
+                    next_node = %next_node,
+                    "Sequence transition"
                 );
 
                 let _ = producer.try_push(events::ScheduledEvent {

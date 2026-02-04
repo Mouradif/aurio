@@ -91,7 +91,7 @@ impl AurioApp {
                         match project.save(path) {
                             Ok(_) => {
                                 self.project_modified = false;
-                                println!("Project saved successfully");
+                                tracing::info!(path = %path.display(), "Project saved successfully");
                             }
                             Err(e) => {
                                 self.error_message = Some(format!("Failed to save project: {}", e));
