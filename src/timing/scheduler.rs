@@ -13,10 +13,8 @@ pub fn schedule_sequence_events(
     producer: &mut EventProducer,
     lua_runtime: Option<&crate::scripting::LuaRuntime>,
 ) -> Result<(), SchedulerError> {
-    let notes = match sequence {
-        Sequence::Static(pattern) => pattern.notes.clone(),
-        Sequence::Generated(_pattern) => sequence.get_notes(lua_runtime),
-    };
+    // Invariant: there is no overlap of notes of the same pitch
+    let notes = sequence.get_notes(lua_runtime);
 
     let samples_per_beat = (60.0 / bpm) * sample_rate;
     let sequence_duration = sequence.duration_samples(bpm, sample_rate) as u64;

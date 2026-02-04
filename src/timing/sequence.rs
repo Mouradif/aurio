@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +30,42 @@ pub struct GeneratedPattern {
     pub function: String,
 }
 
+/// Takes a Vec<Notes> where there may be overlap between notes of the same
+/// pitch and returns a normalized Vec<Notes> with the guarantee that there
+/// will be no such overlap (overlapping notes will be merged)
+fn normalize_notes(mut notes: Vec<Note>) -> Vec<Note> {
+    let mut by_pitch: HashMap<u8, Vec<Note>> = HashMap::new();
+    for note in notes.drain(..) {
+        by_pitch.entry(note.pitch).or_default().push(note);
+    }
+
+    let mut result = Vec::new();
+
+    for (_pitch, mut group) in by_pitch {
+        group.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+
+        let mut current = group[0].clone();
+
+        for note in group.into_iter().skip(1) {
+            let current_end = current.start_beat + current.duration_beats;
+            let note_end = note.start_beat + note.duration_beats;
+
+            if note.start_beat <= current_end {
+                let new_end = current_end.max(note_end);
+                current.duration_beats = new_end - current.start_beat;
+                current.velocity = current.velocity.max(note.velocity);
+            } else {
+                result.push(current);
+                current = note;
+            }
+        }
+
+        result.push(current);
+    }
+
+    result
+}
+
 impl Sequence {
     pub fn duration_samples(&self, bpm: f32, sample_rate: f32) -> usize {
         let (bars, time_sig) = match self {
@@ -45,7 +83,7 @@ impl Sequence {
     }
 
     pub fn get_notes(&self, lua_runtime: Option<&crate::scripting::LuaRuntime>) -> Vec<Note> {
-        match self {
+        let notes = match self {
             Sequence::Static(pattern) => pattern.notes.clone(),
             Sequence::Generated(pattern) => {
                 if let Some(runtime) = lua_runtime {
@@ -59,6 +97,8 @@ impl Sequence {
                     Vec::new()
                 }
             }
-        }
+        };
+
+        normalize_notes(notes)
     }
 }
