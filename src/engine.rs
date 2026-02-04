@@ -427,17 +427,16 @@ fn process_event(
     event: &events::ScheduledEvent,
 ) {
     match &event.event {
-        events::Event::MidiEvent {
-            track_id,
-            pitch,
-            velocity,
-            is_note_on,
-        } => {
-            if *track_id < playback_states.len() {
-                if *is_note_on {
+        events::Event::MidiEvent { track_id, message } => {
+            if *track_id >= playback_states.len() {
+                return;
+            }
+            match message {
+                events::MidiMessage::NoteOn { pitch, velocity } => {
                     let num_oscs = configs.get(*track_id).map_or(0, |c| c.num_oscillators());
                     playback_states[*track_id].note_on(*pitch, *velocity, num_oscs);
-                } else {
+                }
+                events::MidiMessage::NoteOff { pitch } => {
                     playback_states[*track_id].note_off(*pitch);
                 }
             }

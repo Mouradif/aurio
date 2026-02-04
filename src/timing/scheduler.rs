@@ -1,5 +1,5 @@
 use super::Sequence;
-use crate::events::{Event, ScheduledEvent};
+use crate::events::{Event, MidiMessage, ScheduledEvent};
 use ringbuf::traits::Producer;
 
 pub type EventProducer = ringbuf::HeapProd<ScheduledEvent>;
@@ -31,9 +31,10 @@ pub fn schedule_sequence_events(
                 sample_timestamp: note_on_sample,
                 event: Event::MidiEvent {
                     track_id,
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                    is_note_on: true,
+                    message: MidiMessage::NoteOn {
+                        pitch: note.pitch,
+                        velocity: note.velocity,
+                    },
                 },
             });
         }
@@ -46,9 +47,7 @@ pub fn schedule_sequence_events(
                 sample_timestamp: note_off_sample,
                 event: Event::MidiEvent {
                     track_id,
-                    pitch: note.pitch,
-                    velocity: note.velocity,
-                    is_note_on: false,
+                    message: MidiMessage::NoteOff { pitch: note.pitch },
                 },
             });
         }
