@@ -14,6 +14,12 @@ pub struct VariableStore {
     global_vars: HashMap<String, LuaValue>,                // var_name
 }
 
+impl Default for VariableStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VariableStore {
     pub fn new() -> Self {
         Self {

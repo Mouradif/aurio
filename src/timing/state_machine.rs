@@ -40,6 +40,12 @@ pub struct StateGraph {
     pub edges: Vec<Edge>,
 }
 
+impl Default for StateGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateGraph {
     pub fn new() -> Self {
         Self {

@@ -69,10 +69,10 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
     };
 
     loop {
-        match command_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+        match command_rx.recv() {
             Ok(EngineCommand::LoadProject(path)) => match Project::load(&path) {
                 Ok(project) => {
-                    println!("Project loaded successfully");
+                    tracing::info!("Project loaded successfully");
 
                     state.audio_stream = None;
                     state.playing = false;
@@ -90,7 +90,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 }
             },
             Ok(EngineCommand::ReloadProject(project)) => {
-                println!("Reloading project with updated sequences");
+                tracing::debug!("Reloading project with updated sequences");
 
                 if let Some(ref track_configs) = state.track_configs {
                     let new_configs: Vec<audio::TrackConfig> = project
@@ -109,7 +109,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                         .collect();
 
                     track_configs.store(Arc::new(new_configs));
-                    println!("Hot-swapped track configs");
+                    tracing::debug!("Hot-swapped track configs");
                 }
 
                 state.project = Some(project);
@@ -161,10 +161,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 // TODO
             }
 
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                // Timeout - continue to send updates
-            }
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            Err(crossbeam::channel::RecvError) => break,
         }
     }
 }
@@ -274,10 +271,6 @@ fn setup_audio(
     let stream_config: cpal::StreamConfig = config.into();
 
     let num_channels = stream_config.channels as usize;
-    println!(
-        "Audio output: {} channels, {} Hz",
-        num_channels, sample_rate
-    );
 
     let configs_snapshot = track_configs.load();
     let playback_states: Vec<audio::PlaybackState> = configs_snapshot
@@ -301,7 +294,7 @@ fn setup_audio(
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             audio_callback(data, &mut audio_state, &counter_audio);
         },
-        |err| eprintln!("Audio error: {}", err),
+        |err| tracing::error!(err = %err, "Audio error"),
         None,
     )?;
 
@@ -334,9 +327,11 @@ fn timing_thread(
                     current_node.clone()
                 };
 
-                println!(
-                    "Track {}: transitioning from {} to {}",
-                    track_id, current_node, next_node
+                tracing::debug!(
+                    track_id = %track_id,
+                    current_node = %current_node,
+                    next_node = %next_node,
+                    "Sequence transition"
                 );
 
                 let _ = producer.try_push(events::ScheduledEvent {
@@ -427,17 +422,16 @@ fn process_event(
     event: &events::ScheduledEvent,
 ) {
     match &event.event {
-        events::Event::MidiEvent {
-            track_id,
-            pitch,
-            velocity,
-            is_note_on,
-        } => {
-            if *track_id < playback_states.len() {
-                if *is_note_on {
+        events::Event::MidiEvent { track_id, message } => {
+            if *track_id >= playback_states.len() {
+                return;
+            }
+            match message {
+                events::MidiMessage::NoteOn { pitch, velocity } => {
                     let num_oscs = configs.get(*track_id).map_or(0, |c| c.num_oscillators());
                     playback_states[*track_id].note_on(*pitch, *velocity, num_oscs);
-                } else {
+                }
+                events::MidiMessage::NoteOff { pitch } => {
                     playback_states[*track_id].note_off(*pitch);
                 }
             }

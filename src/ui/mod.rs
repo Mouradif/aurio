@@ -65,8 +65,8 @@ impl AurioApp {
                     ui.close();
                 }
 
-                if ui.button("Open Project...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Open Project...").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .set_title("Open Aurio Project")
                         .pick_folder()
                     {
@@ -77,7 +77,6 @@ impl AurioApp {
                             .send(EngineCommand::LoadProject(path));
                         ui.close();
                     }
-                }
 
                 let save_button = if self.project_modified {
                     ui.button("💾 Save Project *")
@@ -91,7 +90,7 @@ impl AurioApp {
                         match project.save(path) {
                             Ok(_) => {
                                 self.project_modified = false;
-                                println!("Project saved successfully");
+                                tracing::info!(path = %path.display(), "Project saved successfully");
                             }
                             Err(e) => {
                                 self.error_message = Some(format!("Failed to save project: {}", e));
@@ -126,10 +125,8 @@ impl AurioApp {
                 if ui.button("⏸ Pause").clicked() {
                     let _ = self.engine.command_tx.send(EngineCommand::Pause);
                 }
-            } else {
-                if ui.button("▶ Play").clicked() {
-                    let _ = self.engine.command_tx.send(EngineCommand::Play);
-                }
+            } else if ui.button("▶ Play").clicked() {
+                let _ = self.engine.command_tx.send(EngineCommand::Play);
             }
 
             if ui.button("⏹ Stop").clicked() {
@@ -222,13 +219,11 @@ impl AurioApp {
                 egui::Color32::LIGHT_GRAY,
             );
 
-            if response.clicked() {
-                if let Some(click_pos) = response.interact_pointer_pos() {
-                    if rect.contains(click_pos) {
+            if response.clicked()
+                && let Some(click_pos) = response.interact_pointer_pos()
+                    && rect.contains(click_pos) {
                         self.selected_node = Some((track.id, node.id.clone()));
                     }
-                }
-            }
         }
     }
 }
@@ -258,24 +253,13 @@ impl eframe::App for AurioApp {
         let mut modified_pattern: Option<(usize, String, StaticPattern)> = None;
 
         let piano_roll_data: Option<(usize, String, StaticPattern, String)> =
-            if let Some((track_id, node_id)) = &self.selected_node {
-                if let Some(ref project) = self.current_project {
-                    if let Some(track) = project.tracks.iter().find(|t| t.id == *track_id) {
-                        if let Some(node) = track.graph.get_node(node_id) {
-                            if let Sequence::Static(pattern) = &node.sequence {
-                                Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            if let Some((track_id, node_id)) = &self.selected_node
+                && let Some(ref project) = self.current_project
+                && let Some(track) = project.tracks.iter().find(|t| t.id == *track_id)
+                && let Some(node) = track.graph.get_node(node_id)
+                && let Sequence::Static(pattern) = &node.sequence
+            {
+                Some((*track_id, node_id.clone(), pattern.clone(), node.id.clone()))
             } else {
                 None
             };
@@ -285,7 +269,7 @@ impl eframe::App for AurioApp {
             let state = self
                 .piano_roll_states
                 .entry(state_key)
-                .or_insert_with(PianoRollState::default);
+                .or_default();
             if state.vertical_zoom == 20.0 && state.horizontal_zoom == 50.0 {
                 state.fit_to_pattern(&pattern, egui::Vec2::new(800.0, 300.0));
             }
@@ -308,18 +292,16 @@ impl eframe::App for AurioApp {
                 });
         }
 
-        if let Some((track_id, node_id, new_pattern)) = modified_pattern {
-            if let Some(ref mut project) = self.current_project {
-                if let Some(track) = project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(node) = track.graph.nodes.iter_mut().find(|n| n.id == node_id) {
-                        node.sequence = Sequence::Static(new_pattern);
-                        let _ = self
-                            .engine
-                            .command_tx
-                            .send(EngineCommand::ReloadProject(project.clone()));
-                    }
-                }
-            }
+        if let Some((track_id, node_id, new_pattern)) = modified_pattern
+            && let Some(ref mut project) = self.current_project
+            && let Some(track) = project.tracks.iter_mut().find(|t| t.id == track_id)
+            && let Some(node) = track.graph.nodes.iter_mut().find(|n| n.id == node_id)
+        {
+            node.sequence = Sequence::Static(new_pattern);
+            let _ = self
+                .engine
+                .command_tx
+                .send(EngineCommand::ReloadProject(project.clone()));
         }
 
         if close_piano_roll {
@@ -348,18 +330,18 @@ impl eframe::App for AurioApp {
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(track_idx) = self.selected_track {
-                    if let Some(ref project) = self.current_project {
-                        if let Some(track) = project.tracks.get(track_idx) {
-                            ui.heading(format!("Graph: {}", track.name));
-                            ui.label(format!("BPM: {}", project.bpm));
-                            if let Some(current) = self.current_nodes.get(&track.id) {
-                                ui.label(format!("▶ Currently playing: {}", current));
-                            }
-                            ui.separator();
-
-                            let track_clone = track.clone();
-                            self.draw_graph(ui, &track_clone);
+                    if let Some(ref project) = self.current_project
+                        && let Some(track) = project.tracks.get(track_idx)
+                    {
+                        ui.heading(format!("Graph: {}", track.name));
+                        ui.label(format!("BPM: {}", project.bpm));
+                        if let Some(current) = self.current_nodes.get(&track.id) {
+                            ui.label(format!("▶ Currently playing: {}", current));
                         }
+                        ui.separator();
+
+                        let track_clone = track.clone();
+                        self.draw_graph(ui, &track_clone);
                     }
                 } else {
                     ui.vertical_centered(|ui| {
