@@ -1,3 +1,4 @@
+use crate::graph::{AudioGraph, NodeId, NodeKind, PortKind};
 use crate::{Project, audio, events, scripting, timing};
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -6,6 +7,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
     traits::{Consumer, Producer, Split},
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -25,7 +27,7 @@ pub enum EngineCommand {
 #[derive(Debug, Clone)]
 pub enum EngineUpdate {
     ProjectLoaded { project: Project },
-    CurrentNodes { track_nodes: Vec<(usize, String)> },
+    CurrentNodes { active_patterns: HashMap<NodeId, NodeId> },
     PlaybackState { playing: bool },
     Error { message: String },
 }
@@ -49,9 +51,28 @@ pub fn spawn_engine() -> EngineHandle {
     }
 }
 
+/// Runtime config for a single instrument node, hot-swappable via ArcSwap.
+#[derive(Debug, Clone)]
+pub struct InstrumentConfig {
+    pub node_id: NodeId,
+    pub instrument: audio::Instrument,
+    pub adsr: audio::ADSRConfig,
+    pub volume: f32,
+    pub pan: f32,
+}
+
+impl InstrumentConfig {
+    pub fn num_oscillators(&self) -> usize {
+        match &self.instrument {
+            audio::Instrument::MultiOsc { oscillators } => oscillators.len(),
+            audio::Instrument::Sampler { .. } => 0,
+        }
+    }
+}
+
 struct EngineState {
     project: Option<Project>,
-    track_configs: Option<Arc<ArcSwap<Vec<audio::TrackConfig>>>>,
+    instrument_configs: Option<Arc<ArcSwap<Vec<InstrumentConfig>>>>,
     sample_counter: Option<Arc<AtomicU64>>,
     lua_runtime: Option<scripting::LuaRuntime>,
     audio_stream: Option<cpal::Stream>,
@@ -61,7 +82,7 @@ struct EngineState {
 fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUpdate>) {
     let mut state = EngineState {
         project: None,
-        track_configs: None,
+        instrument_configs: None,
         sample_counter: None,
         lua_runtime: None,
         audio_stream: None,
@@ -90,26 +111,12 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                 }
             },
             Ok(EngineCommand::ReloadProject(project)) => {
-                tracing::debug!("Reloading project with updated sequences");
+                tracing::debug!("Reloading project with updated data");
 
-                if let Some(ref track_configs) = state.track_configs {
-                    let new_configs: Vec<audio::TrackConfig> = project
-                        .tracks
-                        .iter()
-                        .map(|track_data| {
-                            let mut config = audio::TrackConfig::new(
-                                track_data.id,
-                                track_data.instrument.clone(),
-                                track_data.adsr.clone(),
-                            );
-                            config.volume = track_data.volume;
-                            config.pan = track_data.pan;
-                            config
-                        })
-                        .collect();
-
-                    track_configs.store(Arc::new(new_configs));
-                    tracing::debug!("Hot-swapped track configs");
+                if let Some(ref instrument_configs) = state.instrument_configs {
+                    let new_configs = build_instrument_configs(&project.graph);
+                    instrument_configs.store(Arc::new(new_configs));
+                    tracing::debug!("Hot-swapped instrument configs");
                 }
 
                 state.project = Some(project);
@@ -120,7 +127,7 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
                         match setup_audio(project) {
                             Ok((stream, configs, counter, lua)) => {
                                 state.audio_stream = Some(stream);
-                                state.track_configs = Some(configs);
+                                state.instrument_configs = Some(configs);
                                 state.sample_counter = Some(counter);
                                 state.lua_runtime = Some(lua);
                                 state.playing = true;
@@ -148,12 +155,12 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
 
             Ok(EngineCommand::Stop) => {
                 state.audio_stream = None;
-                state.track_configs = None;
+                state.instrument_configs = None;
                 state.sample_counter = None;
                 state.playing = false;
                 let _ = update_tx.send(EngineUpdate::PlaybackState { playing: false });
                 let _ = update_tx.send(EngineUpdate::CurrentNodes {
-                    track_nodes: vec![],
+                    active_patterns: HashMap::new(),
                 });
             }
 
@@ -166,50 +173,83 @@ fn engine_thread(command_rx: Receiver<EngineCommand>, update_tx: Sender<EngineUp
     }
 }
 
+fn build_instrument_configs(graph: &AudioGraph) -> Vec<InstrumentConfig> {
+    let mut configs = Vec::new();
+
+    // Find mixer to get per-channel volume/pan
+    let mixer_node = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Mixer { .. }));
+    let mixer_channels = match mixer_node {
+        Some(n) => match &n.kind {
+            NodeKind::Mixer { channels } => channels.clone(),
+            _ => vec![],
+        },
+        None => vec![],
+    };
+
+    // Build lookup: synth node id → mixer channel index (from audio edges)
+    let mut synth_to_mixer_port: HashMap<&NodeId, usize> = HashMap::new();
+    if let Some(mixer) = mixer_node {
+        for edge in &graph.edges {
+            if edge.to_node == mixer.id && edge.kind == PortKind::Audio {
+                synth_to_mixer_port.insert(&edge.from_node, edge.to_port);
+            }
+        }
+    }
+
+    for node in &graph.nodes {
+        if let NodeKind::Synth { instrument, adsr } = &node.kind {
+            let (volume, pan) = synth_to_mixer_port
+                .get(&node.id)
+                .and_then(|port| mixer_channels.get(*port))
+                .map(|ch| (ch.volume, ch.pan))
+                .unwrap_or((1.0, 0.0));
+
+            configs.push(InstrumentConfig {
+                node_id: node.id.clone(),
+                instrument: instrument.clone(),
+                adsr: adsr.clone(),
+                volume,
+                pan,
+            });
+        }
+    }
+
+    configs
+}
+
 struct TimingState {
-    graphs: Vec<timing::StateGraph>,
-    current_nodes: Vec<String>,
+    graph: AudioGraph,
+    /// For each initial_pattern_node entry, track the current SM state
+    current_sm_states: Vec<NodeId>,
     sequence_end_samples: Vec<u64>,
+    /// pattern_node_id → target instrument node_id
+    pattern_to_instrument: HashMap<NodeId, NodeId>,
 }
 
 struct AudioState {
-    playback_states: Vec<audio::PlaybackState>,
+    /// instrument node_id → PlaybackState
+    playback_states: HashMap<NodeId, audio::PlaybackState>,
     pending_event: Option<events::ScheduledEvent>,
     consumer: HeapCons<events::ScheduledEvent>,
-    track_configs: Arc<ArcSwap<Vec<audio::TrackConfig>>>,
+    instrument_configs: Arc<ArcSwap<Vec<InstrumentConfig>>>,
+    /// For mixer: which input port maps to which instrument node
+    mixer_inputs: Vec<(NodeId, usize)>,
     sample_rate: f32,
     num_channels: usize,
 }
 
-fn setup_audio(
-    project: &Project,
-) -> Result<
-    (
-        cpal::Stream,
-        Arc<ArcSwap<Vec<audio::TrackConfig>>>,
-        Arc<AtomicU64>,
-        scripting::LuaRuntime,
-    ),
-    Box<dyn std::error::Error>,
-> {
+type AudioSetupResult = (
+    cpal::Stream,
+    Arc<ArcSwap<Vec<InstrumentConfig>>>,
+    Arc<AtomicU64>,
+    scripting::LuaRuntime,
+);
+
+fn setup_audio(project: &Project) -> Result<AudioSetupResult, Box<dyn std::error::Error>> {
     let lua_runtime = scripting::LuaRuntime::new()?;
 
-    let track_configs: Vec<audio::TrackConfig> = project
-        .tracks
-        .iter()
-        .map(|track_data| {
-            let mut config = audio::TrackConfig::new(
-                track_data.id,
-                track_data.instrument.clone(),
-                track_data.adsr.clone(),
-            );
-            config.volume = track_data.volume;
-            config.pan = track_data.pan;
-            config
-        })
-        .collect();
-
-    let track_configs = Arc::new(ArcSwap::from_pointee(track_configs));
+    let configs = build_instrument_configs(&project.graph);
+    let instrument_configs = Arc::new(ArcSwap::from_pointee(configs));
     let sample_counter = Arc::new(AtomicU64::new(0));
 
     let bpm = project.bpm;
@@ -218,52 +258,71 @@ fn setup_audio(
     let ring_buffer = HeapRb::<events::ScheduledEvent>::new(4096);
     let (mut producer, consumer) = ring_buffer.split();
 
-    let mut timing_state = TimingState {
-        graphs: project.tracks.iter().map(|t| t.graph.clone()).collect(),
-        current_nodes: project
-            .tracks
-            .iter()
-            .map(|t| t.initial_node.clone())
-            .collect(),
-        sequence_end_samples: Vec::new(),
-    };
-
-    for (track_id, (graph, current_node)) in timing_state
-        .graphs
-        .iter()
-        .zip(timing_state.current_nodes.iter())
-        .enumerate()
-    {
-        if let Some(node) = graph.get_node(current_node) {
-            let _ = timing::schedule_sequence_events(
-                &node.sequence,
-                track_id,
-                0,
-                bpm,
-                sample_rate,
-                &mut producer,
-                Some(&lua_runtime),
-            );
-            let duration = node.sequence.duration_samples(bpm, sample_rate);
-            timing_state.sequence_end_samples.push(duration as u64);
-        } else {
-            timing_state.sequence_end_samples.push(u64::MAX);
+    // Build pattern → instrument lookup
+    let mut pattern_to_instrument: HashMap<NodeId, NodeId> = HashMap::new();
+    for edge in &project.graph.edges {
+        if edge.kind == PortKind::Event {
+            pattern_to_instrument.insert(edge.from_node.clone(), edge.to_node.clone());
         }
     }
+
+    // Initialize timing state from initial_pattern_nodes
+    let mut current_sm_states = Vec::new();
+    let mut sequence_end_samples = Vec::new();
+
+    for initial_node_id in &project.graph.initial_pattern_nodes {
+        current_sm_states.push(initial_node_id.clone());
+
+        if let Some(node) = project.graph.get_node(initial_node_id) {
+            if let Some(sequence) = node.kind.sequence() {
+                let target = pattern_to_instrument.get(initial_node_id);
+                if let Some(target_node) = target {
+                    let _ = timing::schedule_sequence_events(
+                        &sequence,
+                        target_node,
+                        0,
+                        bpm,
+                        sample_rate,
+                        &mut producer,
+                        Some(&lua_runtime),
+                    );
+                }
+                let duration = sequence.duration_samples(bpm, sample_rate);
+                sequence_end_samples.push(duration as u64);
+            } else {
+                sequence_end_samples.push(u64::MAX);
+            }
+        } else {
+            sequence_end_samples.push(u64::MAX);
+        }
+    }
+
+    let timing_state = TimingState {
+        graph: project.graph.clone(),
+        current_sm_states,
+        sequence_end_samples,
+        pattern_to_instrument: pattern_to_instrument.clone(),
+    };
 
     let counter_timing = sample_counter.clone();
     let lua_timing = scripting::LuaRuntime::new()?;
 
     std::thread::spawn(move || {
-        timing_thread(
-            timing_state,
-            producer,
-            counter_timing,
-            bpm,
-            sample_rate,
-            lua_timing,
-        );
+        timing_thread(timing_state, producer, counter_timing, bpm, sample_rate, lua_timing);
     });
+
+    // Build mixer input mapping
+    let mut mixer_inputs = Vec::new();
+    for node in &project.graph.nodes {
+        if matches!(node.kind, NodeKind::Mixer { .. }) {
+            for edge in &project.graph.edges {
+                if edge.to_node == node.id && edge.kind == PortKind::Audio {
+                    mixer_inputs.push((edge.from_node.clone(), edge.to_port));
+                }
+            }
+            break;
+        }
+    }
 
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or("No output device")?;
@@ -272,17 +331,20 @@ fn setup_audio(
 
     let num_channels = stream_config.channels as usize;
 
-    let configs_snapshot = track_configs.load();
-    let playback_states: Vec<audio::PlaybackState> = configs_snapshot
-        .iter()
-        .map(|_| audio::PlaybackState::new())
-        .collect();
+    // Create playback states for each instrument node
+    let mut playback_states: HashMap<NodeId, audio::PlaybackState> = HashMap::new();
+    for node in &project.graph.nodes {
+        if matches!(node.kind, NodeKind::Synth { .. }) {
+            playback_states.insert(node.id.clone(), audio::PlaybackState::new());
+        }
+    }
 
     let mut audio_state = AudioState {
         playback_states,
         pending_event: None,
         consumer,
-        track_configs: track_configs.clone(),
+        instrument_configs: instrument_configs.clone(),
+        mixer_inputs,
         sample_rate,
         num_channels,
     };
@@ -300,7 +362,7 @@ fn setup_audio(
 
     stream.play()?;
 
-    Ok((stream, track_configs, sample_counter, lua_runtime))
+    Ok((stream, instrument_configs, sample_counter, lua_runtime))
 }
 
 fn timing_thread(
@@ -314,46 +376,53 @@ fn timing_thread(
     loop {
         let current_sample = sample_counter.load(Ordering::Relaxed);
 
-        for track_id in 0..state.graphs.len() {
-            let end_sample = state.sequence_end_samples[track_id];
+        for i in 0..state.current_sm_states.len() {
+            let end_sample = state.sequence_end_samples[i];
             if current_sample >= end_sample {
-                let current_node = &state.current_nodes[track_id];
-                let graph = &state.graphs[track_id];
-                let edges = graph.get_outgoing_edges(current_node);
+                let current_node_id = &state.current_sm_states[i];
+                let sm_edges = state.graph.get_sm_outgoing(current_node_id);
 
-                let next_node = if let Some(edge) = edges.first() {
+                let next_node_id = if let Some(edge) = sm_edges.first() {
                     edge.to.clone()
                 } else {
-                    current_node.clone()
+                    current_node_id.clone()
                 };
 
                 tracing::debug!(
-                    track_id = %track_id,
-                    current_node = %current_node,
-                    next_node = %next_node,
+                    current_node = %current_node_id,
+                    next_node = %next_node_id,
                     "Sequence transition"
                 );
 
-                let _ = producer.try_push(events::ScheduledEvent {
-                    sample_timestamp: current_sample,
-                    event: events::Event::StopAllNotes { track_id },
-                });
+                // Stop all notes on the target instrument
+                if let Some(target) = state.pattern_to_instrument.get(current_node_id) {
+                    let _ = producer.try_push(events::ScheduledEvent {
+                        sample_timestamp: current_sample,
+                        event: events::Event::StopAllNotes {
+                            target_node: target.clone(),
+                        },
+                    });
+                }
 
-                state.current_nodes[track_id] = next_node.clone();
+                state.current_sm_states[i] = next_node_id.clone();
 
-                if let Some(node) = graph.get_node(&next_node) {
-                    let _ = timing::schedule_sequence_events(
-                        &node.sequence,
-                        track_id,
-                        current_sample,
-                        bpm,
-                        sample_rate,
-                        &mut producer,
-                        Some(&lua_runtime),
-                    );
+                if let Some(node) = state.graph.get_node(&next_node_id)
+                    && let Some(sequence) = node.kind.sequence()
+                {
+                    if let Some(target) = state.pattern_to_instrument.get(&next_node_id) {
+                        let _ = timing::schedule_sequence_events(
+                            &sequence,
+                            target,
+                            current_sample,
+                            bpm,
+                            sample_rate,
+                            &mut producer,
+                            Some(&lua_runtime),
+                        );
+                    }
 
-                    let duration = node.sequence.duration_samples(bpm, sample_rate);
-                    state.sequence_end_samples[track_id] = current_sample + duration as u64;
+                    let duration = sequence.duration_samples(bpm, sample_rate);
+                    state.sequence_end_samples[i] = current_sample + duration as u64;
                 }
             }
         }
@@ -365,7 +434,15 @@ fn audio_callback(data: &mut [f32], state: &mut AudioState, sample_counter: &Arc
     let current_sample = sample_counter.load(Ordering::Relaxed);
     let buffer_end = current_sample + num_frames as u64;
 
-    let configs = state.track_configs.load();
+    let configs = state.instrument_configs.load();
+
+    // Build a quick lookup: node_id → config index
+    let config_map: HashMap<&NodeId, usize> = configs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (&c.node_id, i))
+        .collect();
+
     let mut events: Vec<events::ScheduledEvent> = Vec::with_capacity(64);
     if let Some(ev) = state.pending_event.take() {
         if ev.sample_timestamp < buffer_end {
@@ -400,7 +477,7 @@ fn audio_callback(data: &mut [f32], state: &mut AudioState, sample_counter: &Arc
             if event_frame > frame {
                 break;
             }
-            process_event(&mut state.playback_states, &configs, &events[event_idx]);
+            process_event(&mut state.playback_states, &configs, &config_map, &events[event_idx]);
             event_idx += 1;
         }
 
@@ -408,6 +485,8 @@ fn audio_callback(data: &mut [f32], state: &mut AudioState, sample_counter: &Arc
             &mut data[frame * state.num_channels..(frame + 1) * state.num_channels],
             &mut state.playback_states,
             &configs,
+            &config_map,
+            &state.mixer_inputs,
             state.sample_rate,
         );
         frame += 1;
@@ -417,28 +496,31 @@ fn audio_callback(data: &mut [f32], state: &mut AudioState, sample_counter: &Arc
 }
 
 fn process_event(
-    playback_states: &mut [audio::PlaybackState],
-    configs: &[audio::TrackConfig],
+    playback_states: &mut HashMap<NodeId, audio::PlaybackState>,
+    configs: &[InstrumentConfig],
+    config_map: &HashMap<&NodeId, usize>,
     event: &events::ScheduledEvent,
 ) {
     match &event.event {
-        events::Event::MidiEvent { track_id, message } => {
-            if *track_id >= playback_states.len() {
-                return;
-            }
-            match message {
-                events::MidiMessage::NoteOn { pitch, velocity } => {
-                    let num_oscs = configs.get(*track_id).map_or(0, |c| c.num_oscillators());
-                    playback_states[*track_id].note_on(*pitch, *velocity, num_oscs);
-                }
-                events::MidiMessage::NoteOff { pitch } => {
-                    playback_states[*track_id].note_off(*pitch);
+        events::Event::MidiEvent { target_node, message } => {
+            if let Some(state) = playback_states.get_mut(target_node) {
+                match message {
+                    events::MidiMessage::NoteOn { pitch, velocity } => {
+                        let num_oscs = config_map
+                            .get(target_node)
+                            .and_then(|&i| configs.get(i))
+                            .map_or(0, |c| c.num_oscillators());
+                        state.note_on(*pitch, *velocity, num_oscs);
+                    }
+                    events::MidiMessage::NoteOff { pitch } => {
+                        state.note_off(*pitch);
+                    }
                 }
             }
         }
-        events::Event::StopAllNotes { track_id } => {
-            if *track_id < playback_states.len() {
-                playback_states[*track_id].stop_all();
+        events::Event::StopAllNotes { target_node } => {
+            if let Some(state) = playback_states.get_mut(target_node) {
+                state.stop_all();
             }
         }
         events::Event::NodeTransition { .. } => {}
@@ -447,23 +529,31 @@ fn process_event(
 
 fn render_frame(
     output: &mut [f32],
-    states: &mut [audio::PlaybackState],
-    configs: &[audio::TrackConfig],
+    states: &mut HashMap<NodeId, audio::PlaybackState>,
+    configs: &[InstrumentConfig],
+    config_map: &HashMap<&NodeId, usize>,
+    mixer_inputs: &[(NodeId, usize)],
     sample_rate: f32,
 ) {
-    for (state, config) in states.iter_mut().zip(configs.iter()) {
-        let sample = state.render_sample(config, sample_rate);
+    // Render each instrument and sum through the mixer
+    for (synth_node_id, _mixer_port) in mixer_inputs {
+        if let Some(state) = states.get_mut(synth_node_id)
+            && let Some(&config_idx) = config_map.get(synth_node_id)
+        {
+            let config = &configs[config_idx];
+            let sample = state.render_sample_with_config(config, sample_rate);
 
-        let (l_gain, r_gain) = pan_to_gains(config.pan);
+            let (l_gain, r_gain) = pan_to_gains(config.pan);
 
-        let left = sample * l_gain * config.volume;
-        let right = sample * r_gain * config.volume;
+            let left = sample * l_gain * config.volume;
+            let right = sample * r_gain * config.volume;
 
-        if output.len() >= 2 {
-            output[0] += left;
-            output[1] += right;
-        } else if !output.is_empty() {
-            output[0] += sample * config.volume;
+            if output.len() >= 2 {
+                output[0] += left;
+                output[1] += right;
+            } else if !output.is_empty() {
+                output[0] += sample * config.volume;
+            }
         }
     }
 }

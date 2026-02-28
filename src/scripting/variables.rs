@@ -1,3 +1,4 @@
+use crate::graph::NodeId;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -9,9 +10,8 @@ pub enum LuaValue {
 }
 
 pub struct VariableStore {
-    node_vars: HashMap<(usize, String, String), LuaValue>, // (track_id, node_id, var_name)
-    track_vars: HashMap<(usize, String), LuaValue>,        // (track_id, var_name)
-    global_vars: HashMap<String, LuaValue>,                // var_name
+    node_vars: HashMap<(NodeId, String), LuaValue>,
+    global_vars: HashMap<String, LuaValue>,
 }
 
 impl Default for VariableStore {
@@ -24,32 +24,20 @@ impl VariableStore {
     pub fn new() -> Self {
         Self {
             node_vars: HashMap::new(),
-            track_vars: HashMap::new(),
             global_vars: HashMap::new(),
         }
     }
 
-    pub fn get_node_var(&self, track_id: usize, node_id: &str, name: &str) -> LuaValue {
+    pub fn get_node_var(&self, node_id: &NodeId, name: &str) -> LuaValue {
         self.node_vars
-            .get(&(track_id, node_id.to_string(), name.to_string()))
+            .get(&(node_id.clone(), name.to_string()))
             .cloned()
             .unwrap_or(LuaValue::Nil)
     }
 
-    pub fn set_node_var(&mut self, track_id: usize, node_id: &str, name: &str, value: LuaValue) {
+    pub fn set_node_var(&mut self, node_id: &NodeId, name: &str, value: LuaValue) {
         self.node_vars
-            .insert((track_id, node_id.to_string(), name.to_string()), value);
-    }
-
-    pub fn get_track_var(&self, track_id: usize, name: &str) -> LuaValue {
-        self.track_vars
-            .get(&(track_id, name.to_string()))
-            .cloned()
-            .unwrap_or(LuaValue::Nil)
-    }
-
-    pub fn set_track_var(&mut self, track_id: usize, name: &str, value: LuaValue) {
-        self.track_vars.insert((track_id, name.to_string()), value);
+            .insert((node_id.clone(), name.to_string()), value);
     }
 
     pub fn get_global(&self, name: &str) -> LuaValue {

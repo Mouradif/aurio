@@ -77,15 +77,27 @@ impl PlaybackState {
         }
     }
 
+    pub fn render_sample_with_config(
+        &mut self,
+        config: &crate::engine::InstrumentConfig,
+        sample_rate: f32,
+    ) -> f32 {
+        self.render_sample_inner(&config.instrument, &config.adsr, sample_rate)
+    }
+
     pub fn render_sample(&mut self, config: &TrackConfig, sample_rate: f32) -> f32 {
+        self.render_sample_inner(&config.instrument, &config.adsr, sample_rate)
+    }
+
+    fn render_sample_inner(&mut self, instrument: &Instrument, adsr: &ADSRConfig, sample_rate: f32) -> f32 {
         let mut output = 0.0;
 
         for pitch in 0..128u8 {
             let should_remove = if let Some(state) = &mut self.notes[pitch as usize] {
-                let envelope = calculate_envelope_from_playback(state, &config.adsr);
+                let envelope = calculate_envelope_from_playback(state, adsr);
                 let velocity_scale = state.velocity as f32 / 127.0;
 
-                match &config.instrument {
+                match instrument {
                     Instrument::MultiOsc { oscillators } => {
                         for (i, osc) in oscillators.iter().enumerate() {
                             let note = (pitch as i8 + osc.semitone) as u8;
@@ -117,8 +129,8 @@ impl PlaybackState {
                     }
                 }
 
-                advance_envelope_one_sample_playback(state, &config.adsr, sample_rate);
-                matches!(state.envelope_state, EnvelopeState::Release { time } if time > config.adsr.release)
+                advance_envelope_one_sample_playback(state, adsr, sample_rate);
+                matches!(state.envelope_state, EnvelopeState::Release { time } if time > adsr.release)
             } else {
                 false
             };

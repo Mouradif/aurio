@@ -56,7 +56,12 @@ impl<'a> PianoRoll<'a> {
         Self { pattern, state }
     }
 
-    pub fn show(mut self, ui: &mut egui::Ui) -> PianoRollResponse {
+    pub fn show(
+        mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        panel_rect: Option<egui::Rect>,
+    ) -> PianoRollResponse {
         let mut response = PianoRollResponse { modified: false };
 
         let available_size = ui.available_size();
@@ -66,7 +71,7 @@ impl<'a> PianoRoll<'a> {
         let rect = rect_response.rect;
         let piano_key_width = 60.0;
 
-        self.handle_input(ui, rect.size());
+        self.handle_input(ctx, panel_rect, rect.size());
 
         let visible_semitones = rect.height() / self.state.vertical_zoom;
         let min_visible_pitch = self.state.pan_y.floor() as u8;
@@ -117,10 +122,25 @@ impl<'a> PianoRoll<'a> {
         response
     }
 
-    fn handle_input(&mut self, ui: &egui::Ui, available_size: egui::Vec2) {
-        let modifiers = ui.input(|i| i.modifiers);
+    fn handle_input(
+        &mut self,
+        ctx: &egui::Context,
+        panel_rect: Option<egui::Rect>,
+        available_size: egui::Vec2,
+    ) {
+        // Only process scroll if pointer is over the piano roll panel
+        if let Some(pr) = panel_rect {
+            let pointer_in = ctx.input(|i| {
+                i.pointer.latest_pos().is_some_and(|pos| pr.contains(pos))
+            });
+            if !pointer_in {
+                return;
+            }
+        }
 
-        ui.input(|i| {
+        let modifiers = ctx.input(|i| i.modifiers);
+
+        ctx.input(|i| {
             let scroll_delta = i.smooth_scroll_delta;
 
             if modifiers.alt {
@@ -199,6 +219,7 @@ impl<'a> PianoRoll<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_grid(
         &self,
         painter: &egui::Painter,

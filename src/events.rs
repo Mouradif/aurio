@@ -1,3 +1,5 @@
+use crate::graph::NodeId;
+
 #[derive(Debug, Clone)]
 pub struct ScheduledEvent {
     pub sample_timestamp: u64,
@@ -13,14 +15,14 @@ pub enum MidiMessage {
 #[derive(Debug, Clone)]
 pub enum Event {
     MidiEvent {
-        track_id: usize,
+        target_node: NodeId,
         message: MidiMessage,
     },
     StopAllNotes {
-        track_id: usize,
+        target_node: NodeId,
     },
     NodeTransition {
-        track_id: usize,
-        new_node_id: String,
+        pattern_node: NodeId,
+        new_sm_state: NodeId,
     },
 }

@@ -1,12 +1,13 @@
 use super::Sequence;
 use crate::events::{Event, MidiMessage, ScheduledEvent};
+use crate::graph::NodeId;
 use ringbuf::traits::Producer;
 
 pub type EventProducer = ringbuf::HeapProd<ScheduledEvent>;
 
 pub fn schedule_sequence_events(
     sequence: &Sequence,
-    track_id: usize,
+    target_node: &NodeId,
     start_sample: u64,
     bpm: f32,
     sample_rate: f32,
@@ -28,7 +29,7 @@ pub fn schedule_sequence_events(
             events.push(ScheduledEvent {
                 sample_timestamp: note_on_sample,
                 event: Event::MidiEvent {
-                    track_id,
+                    target_node: target_node.clone(),
                     message: MidiMessage::NoteOn {
                         pitch: note.pitch,
                         velocity: note.velocity,
@@ -44,7 +45,7 @@ pub fn schedule_sequence_events(
             events.push(ScheduledEvent {
                 sample_timestamp: note_off_sample,
                 event: Event::MidiEvent {
-                    track_id,
+                    target_node: target_node.clone(),
                     message: MidiMessage::NoteOff { pitch: note.pitch },
                 },
             });

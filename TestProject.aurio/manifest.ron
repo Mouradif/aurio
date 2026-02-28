@@ -1,0 +1,76 @@
+(
+    name: "Test Project",
+    version: "0.1.0",
+    bpm: 120.0,
+    sample_rate: 44100,
+    sample_library: [],
+    graph: (
+        nodes: [
+            (
+                id: ("node-a"),
+                name: "node-a",
+                kind: PianoRoll(
+                    pattern: (
+                        duration_bars: 2,
+                        time_signature: (4, 4),
+                        notes: [
+                            (pitch: 45, velocity: 100, start_beat: 0.0, duration_beats: 0.5),
+                            (pitch: 45, velocity: 90, start_beat: 0.5, duration_beats: 0.5),
+                            (pitch: 57, velocity: 100, start_beat: 1.0, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 1.5, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 2.0, duration_beats: 0.5),
+                            (pitch: 57, velocity: 100, start_beat: 2.5, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 3.0, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 3.5, duration_beats: 0.5),
+                            (pitch: 60, velocity: 100, start_beat: 4.0, duration_beats: 0.5),
+                            (pitch: 57, velocity: 100, start_beat: 4.5, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 5.0, duration_beats: 0.5),
+                            (pitch: 57, velocity: 100, start_beat: 5.5, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 6.0, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 6.5, duration_beats: 0.5),
+                            (pitch: 57, velocity: 100, start_beat: 7.0, duration_beats: 0.5),
+                            (pitch: 45, velocity: 100, start_beat: 7.5, duration_beats: 0.5),
+                        ],
+                    ),
+                ),
+                position: (100.0, 200.0),
+            ),
+            (
+                id: ("synth-0"),
+                name: "Test Synth",
+                kind: Synth(
+                    instrument: MultiOsc(
+                        oscillators: [
+                            (wave: Sine, gain: 0.3, semitone: 0),
+                        ],
+                    ),
+                    adsr: (attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.2),
+                ),
+                position: (500.0, 300.0),
+            ),
+            (
+                id: ("mixer"),
+                name: "Main Mixer",
+                kind: Mixer(
+                    channels: [
+                        (volume: 1.0, pan: 0.0, mute: false, solo: false),
+                    ],
+                ),
+                position: (700.0, 300.0),
+            ),
+            (
+                id: ("output"),
+                name: "Output",
+                kind: Output(device: None),
+                position: (900.0, 300.0),
+            ),
+        ],
+        edges: [
+            (from_node: ("node-a"), from_port: 0, to_node: ("synth-0"), to_port: 0, kind: Event),
+            (from_node: ("synth-0"), from_port: 0, to_node: ("mixer"), to_port: 0, kind: Audio),
+            (from_node: ("mixer"), from_port: 0, to_node: ("output"), to_port: 0, kind: Audio),
+        ],
+        state_machine_edges: [],
+        initial_pattern_nodes: [("node-a")],
+    ),
+)
